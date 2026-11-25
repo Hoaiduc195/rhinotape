@@ -377,6 +377,7 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
         scrub_body=marker_kwargs.get("scrub_body"),
         match_on=marker_kwargs.get("match_on") or DEFAULT_MATCH_ON,
         custom_matcher=marker_kwargs.get("custom_matcher"),
+        on_replay=marker_kwargs.get("on_replay"),
         replay_latency_scale=float(marker_kwargs.get("replay_latency_scale", 0.0)),
         allow_playback_repeats=bool(marker_kwargs.get("allow_playback_repeats", False)),
         save_on_error=bool(marker_kwargs.get("save_on_error", False)),

@@ -58,6 +58,75 @@ R = TypeVar("R")
 _STRIP_REPLAY_HEADERS = frozenset({"content-encoding", "transfer-encoding", "content-length"})
 _LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _HANDLED_EXT_KEY = "_llm_tape_handled"
+_UNSET: Any = object()
+
+
+def replace_response(
+    interaction: Interaction,
+    *,
+    status_code: int | None = None,
+    body: Any = _UNSET,
+    headers: dict[str, str] | None = None,
+    stream_chunks: tuple[str, ...] | None = _UNSET,
+    latency_ms: float | None = None,
+) -> Interaction:
+    """Return a copy of an Interaction with modified response fields for chaos/fault replay."""
+    orig = interaction.response
+    new_status = orig.status_code if status_code is None else int(status_code)
+    new_headers = dict(orig.headers) if headers is None else dict(headers)
+    new_latency = interaction.latency_ms if latency_ms is None else float(latency_ms)
+
+    body_changed = body is not _UNSET
+    chunks_changed = stream_chunks is not _UNSET
+
+    if chunks_changed and stream_chunks is not None:
+        new_chunks: tuple[str, ...] | None = tuple(stream_chunks)
+        new_body: Any = None
+        new_encoding = "stream"
+    elif body_changed:
+        new_chunks = None
+        new_body = body
+        if body is None:
+            new_encoding = "empty"
+        elif isinstance(body, (dict, list, int, float, bool)):
+            new_encoding = "json"
+        else:
+            new_encoding = "text"
+    else:
+        new_chunks = orig.stream_chunks if stream_chunks is _UNSET else stream_chunks
+        new_body = orig.body
+        new_encoding = orig.body_encoding
+
+    new_resp = RecordedResponse(
+        status_code=new_status,
+        headers=new_headers,
+        body=new_body,
+        body_encoding=new_encoding,
+        stream_chunks=new_chunks,
+    )
+    if body_changed or chunks_changed:
+        ct = ""
+        for k, v in new_headers.items():
+            if k.lower() == "content-type":
+                ct = v
+                break
+        new_llm = parse_llm_interaction(
+            url=interaction.request.url,
+            request_body=interaction.request.body,
+            response_body=new_body,
+            stream_chunks=new_chunks,
+            content_type=ct,
+        )
+    else:
+        new_llm = interaction.llm
+
+    return Interaction(
+        request=interaction.request,
+        response=new_resp,
+        latency_ms=new_latency,
+        llm=new_llm,
+    )
+
 
 # --- Global contextvars + ref-counted httpx dispatcher ---------------------
 
@@ -351,6 +420,7 @@ class TapeSession:
         scrub_body: Callable[[Any], Any] | None = None,
         match_on: Iterable[str] = DEFAULT_MATCH_ON,
         custom_matcher: Callable[[RecordedRequest, RecordedRequest], bool] | None = None,
+        on_replay: Callable[[Interaction, int], Interaction | None] | None = None,
         replay_latency_scale: float = 0.0,
         allow_playback_repeats: bool = False,
         save_on_error: bool = False,
@@ -379,6 +449,7 @@ class TapeSession:
         self.scrub_body = scrub_body
         self.match_on = validate_match_on(match_on)
         self.custom_matcher = custom_matcher
+        self.on_replay = on_replay
         self.replay_latency_scale = float(replay_latency_scale)
         self.allow_playback_repeats = allow_playback_repeats
         self.save_on_error = save_on_error
@@ -393,6 +464,7 @@ class TapeSession:
         self._custom_replay_list: list[tuple[int, Interaction]] = []
         self._total_loaded_count = 0
         self._consumed_indices: set[int] = set()
+        self._replay_call_seq = 0
         self._known_fingerprints: dict[str, int] = {}
         self._all_loaded_requests: list[RecordedRequest] = []
         self._is_replaying = False
@@ -417,6 +489,7 @@ class TapeSession:
                 self._custom_replay_list.clear()
                 self._total_loaded_count = 0
                 self._consumed_indices.clear()
+                self._replay_call_seq = 0
                 self._known_fingerprints.clear()
                 self._all_loaded_requests.clear()
 
@@ -617,6 +690,7 @@ class TapeSession:
     def _pop_replay_interaction(self, recorded_req: RecordedRequest) -> Interaction:
         with self._lock:
             if self.custom_matcher is not None:
+                matched: Interaction | None = None
                 for pos, (orig_idx, candidate) in enumerate(self._custom_replay_list):
                     if self.custom_matcher(candidate.request, recorded_req):
                         has_later_match = self.allow_playback_repeats and any(
@@ -624,52 +698,71 @@ class TapeSession:
                             for _, later in self._custom_replay_list[pos + 1 :]
                         )
                         if self.allow_playback_repeats and not has_later_match:
-                            interaction = candidate
+                            matched = candidate
                         else:
-                            _, interaction = self._custom_replay_list.pop(pos)
+                            _, matched = self._custom_replay_list.pop(pos)
                         self._consumed_indices.add(orig_idx)
-                        self._interactions.append(interaction)
-                        return interaction
-                diff_text = format_request_diff(
-                    recorded_req,
-                    self._all_loaded_requests,
-                    ignore_fields=self.ignore_fields,
-                    ignore_query_params=self.ignore_query_params,
-                )
-                raise UnmatchedRequestError(
-                    f"No recorded interaction matched custom_matcher for "
-                    f"{recorded_req.method} {recorded_req.url} in cassette {self.cassette_path}.\n"
-                    f"Closest recorded request diff:\n{diff_text}"
-                )
-
-            queue = self._replay_queues.get(recorded_req.fingerprint)
-            if not queue:
-                if recorded_req.fingerprint in self._known_fingerprints:
-                    total = self._known_fingerprints[recorded_req.fingerprint]
-                    raise UnmatchedRequestError(
-                        f"Replay queue exhausted for {recorded_req.method} {recorded_req.url}: "
-                        f"cassette {self.cassette_path} only recorded {total} matching call(s), "
-                        f"but code made call #{total + 1}. "
-                        "Pass allow_playback_repeats=True if repeated identical calls are expected."
+                        break
+                if matched is None:
+                    diff_text = format_request_diff(
+                        recorded_req,
+                        self._all_loaded_requests,
+                        ignore_fields=self.ignore_fields,
+                        ignore_query_params=self.ignore_query_params,
                     )
-                diff_text = format_request_diff(
-                    recorded_req,
-                    self._all_loaded_requests,
-                    ignore_fields=self.ignore_fields,
-                    ignore_query_params=self.ignore_query_params,
-                )
-                raise UnmatchedRequestError(
-                    f"No recorded interaction matches {recorded_req.method} {recorded_req.url} "
-                    f"(fingerprint={recorded_req.fingerprint}) in cassette {self.cassette_path}.\n"
-                    f"Closest recorded request diff:\n{diff_text}"
-                )
+                    raise UnmatchedRequestError(
+                        f"No recorded interaction matched custom_matcher for "
+                        f"{recorded_req.method} {recorded_req.url} in cassette "
+                        f"{self.cassette_path}.\nClosest recorded request diff:\n{diff_text}"
+                    )
+                interaction = matched
+            else:
+                queue = self._replay_queues.get(recorded_req.fingerprint)
+                if not queue:
+                    if recorded_req.fingerprint in self._known_fingerprints:
+                        total = self._known_fingerprints[recorded_req.fingerprint]
+                        raise UnmatchedRequestError(
+                            f"Replay queue exhausted for {recorded_req.method} {recorded_req.url}: "
+                            f"cassette {self.cassette_path} only recorded {total} matching "
+                            f"call(s), but code made call #{total + 1}. "
+                            "Pass allow_playback_repeats=True if repeated identical calls are "
+                            "expected."
+                        )
+                    diff_text = format_request_diff(
+                        recorded_req,
+                        self._all_loaded_requests,
+                        ignore_fields=self.ignore_fields,
+                        ignore_query_params=self.ignore_query_params,
+                    )
+                    raise UnmatchedRequestError(
+                        f"No recorded interaction matches {recorded_req.method} {recorded_req.url} "
+                        f"(fingerprint={recorded_req.fingerprint}) in cassette "
+                        f"{self.cassette_path}.\nClosest recorded request diff:\n{diff_text}"
+                    )
 
-            orig_idx, interaction = (
-                queue[0] if (self.allow_playback_repeats and len(queue) == 1) else queue.popleft()
-            )
-            self._consumed_indices.add(orig_idx)
+                orig_idx, interaction = (
+                    queue[0]
+                    if (self.allow_playback_repeats and len(queue) == 1)
+                    else queue.popleft()
+                )
+                self._consumed_indices.add(orig_idx)
+
+            call_idx = self._replay_call_seq
+            self._replay_call_seq += 1
+
+        if self.on_replay is not None:
+            transformed = self.on_replay(interaction, call_idx)
+            if transformed is not None:
+                if not isinstance(transformed, Interaction):
+                    raise TypeError(
+                        f"on_replay callback must return Interaction or None, "
+                        f"got {type(transformed).__name__}"
+                    )
+                interaction = transformed
+
+        with self._lock:
             self._interactions.append(interaction)
-            return interaction
+        return interaction
 
     def _build_replay_httpx_response(
         self,
@@ -1213,6 +1306,7 @@ def tape(
     scrub_body: Callable[[Any], Any] | None = None,
     match_on: Iterable[str] = DEFAULT_MATCH_ON,
     custom_matcher: Callable[[RecordedRequest, RecordedRequest], bool] | None = None,
+    on_replay: Callable[[Interaction, int], Interaction | None] | None = None,
     replay_latency_scale: float = 0.0,
     allow_playback_repeats: bool = False,
     save_on_error: bool = False,
@@ -1237,6 +1331,7 @@ def tape(
         scrub_body=scrub_body,
         match_on=match_on,
         custom_matcher=custom_matcher,
+        on_replay=on_replay,
         replay_latency_scale=replay_latency_scale,
         allow_playback_repeats=allow_playback_repeats,
         save_on_error=save_on_error,
