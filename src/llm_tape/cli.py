@@ -19,7 +19,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
 from llm_tape._version import __version__ as _VERSION
-from llm_tape.cassette import Cassette, iter_cassette_files
+from llm_tape.cassette import Cassette, cassette_json_schema, iter_cassette_files
 from llm_tape.models import (
     CorruptCassetteError,
     Interaction,
@@ -1424,6 +1424,17 @@ def _cmd_stats(target: Path, *, as_json: bool = False) -> int:
     return 1 if errors else 0
 
 
+def _cmd_schema(*, output: Path | None = None) -> int:
+    """Output the Draft 2020-12 JSON Schema for .tape.json cassettes."""
+    rendered = json.dumps(cassette_json_schema(), indent=2, ensure_ascii=False) + "\n"
+    if output is not None:
+        _write_text_atomic(output, rendered)
+        print(f"Wrote JSON Schema to {output}.")
+    else:
+        sys.stdout.write(rendered)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llm-tape",
@@ -1677,6 +1688,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_stats.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
 
+    p_schema = sub.add_parser(
+        "schema",
+        help="Output the Draft 2020-12 JSON Schema for .tape.json cassettes.",
+    )
+    p_schema.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=None,
+        help="Optional file path to write schema JSON (defaults to stdout).",
+    )
+
     return parser
 
 
@@ -1744,6 +1767,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "stats":
             return _cmd_stats(args.target, as_json=args.as_json)
+        if args.command == "schema":
+            return _cmd_schema(output=args.output)
     except (TapeError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

@@ -113,10 +113,11 @@ def _extract_urllib_request(
         req = fullurl
         url = fullurl.full_url
         req_data = data if data is not None else fullurl.data
+        explicit_method = getattr(fullurl, "method", None)
         method = (
-            fullurl.get_method().upper()
-            if req_data is None
-            else (fullurl.method.upper() if fullurl.method else "POST")
+            explicit_method.upper()
+            if explicit_method
+            else ("POST" if req_data is not None else fullurl.get_method().upper())
         )
         headers = list(fullurl.header_items())
     else:

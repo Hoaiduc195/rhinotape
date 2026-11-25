@@ -1227,6 +1227,26 @@ class TapeSession:
     def is_replaying(self) -> bool:
         return self._is_replaying
 
+    def export_summary(self) -> dict[str, Any]:
+        """Return a JSON-serializable summary of interactions observed in this session."""
+        interactions = self.interactions
+        usage = self.total_usage
+        return {
+            "cassette_path": str(self.cassette_path),
+            "mode": self.mode.value,
+            "calls": len(interactions),
+            "input_tokens": usage.input_tokens,
+            "cached_input_tokens": usage.cached_input_tokens,
+            "output_tokens": usage.output_tokens,
+            "reasoning_tokens": usage.reasoning_tokens,
+            "total_tokens": usage.total_tokens,
+            "estimated_cost_usd": round(sum(i.llm.estimated_cost_usd for i in interactions), 8),
+            "latency_ms": round(sum(i.latency_ms for i in interactions), 2),
+            "providers": sorted({i.llm.provider for i in interactions}),
+            "models": sorted({i.llm.model for i in interactions if i.llm.model}),
+            "tools": [tc.name for i in interactions for tc in i.llm.tool_calls],
+        }
+
     # --- Assertions --------------------------------------------------------
 
     def assert_call_count(self, expected: int) -> None:

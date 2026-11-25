@@ -22,6 +22,106 @@ MAX_CASSETTE_BYTES = 100 * 1024 * 1024  # 100 MiB decompression safety cap
 _GZIP_MAGIC = b"\x1f\x8b"
 
 
+def cassette_json_schema() -> dict[str, Any]:
+    """Return a Draft 2020-12 JSON Schema describing the .tape.json cassette v2 format."""
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://github.com/Hoaiduc195/llm-tape/schemas/cassette-v2.schema.json",
+        "title": "llm-tape Cassette",
+        "description": "Recorded HTTP & SSE LLM interactions for deterministic offline replay.",
+        "type": "object",
+        "required": ["schema_version", "interactions"],
+        "properties": {
+            "schema_version": {"type": "integer", "minimum": 1, "maximum": SCHEMA_VERSION},
+            "recorded_at": {"type": "string"},
+            "metadata": {"type": ["object", "null"]},
+            "summary": {
+                "type": "object",
+                "properties": {
+                    "calls": {"type": "integer", "minimum": 0},
+                    "total_tokens": {"type": "integer", "minimum": 0},
+                    "estimated_cost_usd": {"type": "number", "minimum": 0},
+                },
+            },
+            "interactions": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["request", "response"],
+                    "properties": {
+                        "request": {
+                            "type": "object",
+                            "required": ["method", "url", "fingerprint"],
+                            "properties": {
+                                "method": {"type": "string"},
+                                "url": {"type": "string"},
+                                "headers": {"type": "object"},
+                                "body": {},
+                                "fingerprint": {"type": "string"},
+                                "body_encoding": {
+                                    "type": "string",
+                                    "enum": ["json", "text", "base64", "empty"],
+                                },
+                            },
+                        },
+                        "response": {
+                            "type": "object",
+                            "required": ["status_code"],
+                            "properties": {
+                                "status_code": {"type": "integer", "minimum": 100, "maximum": 599},
+                                "headers": {"type": "object"},
+                                "body": {},
+                                "body_encoding": {
+                                    "type": "string",
+                                    "enum": ["json", "text", "base64", "empty", "stream"],
+                                },
+                                "stream_chunks": {
+                                    "type": ["array", "null"],
+                                    "items": {"type": "string"},
+                                },
+                            },
+                        },
+                        "latency_ms": {"type": "number", "minimum": 0},
+                        "llm": {
+                            "type": "object",
+                            "properties": {
+                                "provider": {"type": "string"},
+                                "model": {"type": ["string", "null"]},
+                                "usage": {
+                                    "type": "object",
+                                    "properties": {
+                                        "input_tokens": {"type": "integer", "minimum": 0},
+                                        "output_tokens": {"type": "integer", "minimum": 0},
+                                        "total_tokens": {"type": "integer", "minimum": 0},
+                                        "cached_input_tokens": {"type": "integer", "minimum": 0},
+                                        "reasoning_tokens": {"type": "integer", "minimum": 0},
+                                    },
+                                },
+                                "estimated_cost_usd": {"type": "number", "minimum": 0},
+                                "tool_calls": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "required": ["name"],
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "arguments": {},
+                                            "call_id": {"type": ["string", "null"]},
+                                        },
+                                    },
+                                },
+                                "text": {"type": "string"},
+                                "thinking": {"type": "string"},
+                                "is_stream": {"type": "boolean"},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+
+
 def is_cassette_file(path: Path) -> bool:
     """Return True if path has a supported llm-tape cassette extension."""
     lower = path.name.lower()
