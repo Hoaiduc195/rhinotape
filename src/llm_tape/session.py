@@ -436,6 +436,7 @@ class TapeSession:
         match_headers: Iterable[str] = (),
         custom_matcher: Callable[[RecordedRequest, RecordedRequest], bool] | None = None,
         on_replay: Callable[[Interaction, int], Interaction | None] | None = None,
+        on_record: Callable[[Interaction], Interaction | None] | None = None,
         replay_latency_scale: float = 0.0,
         allow_playback_repeats: bool = False,
         save_on_error: bool = False,
@@ -474,6 +475,7 @@ class TapeSession:
         self.match_headers = tuple(h.lower().strip() for h in match_headers if h.strip())
         self.custom_matcher = custom_matcher
         self.on_replay = on_replay
+        self.on_record = on_record
         self.replay_latency_scale = float(replay_latency_scale)
         self.allow_playback_repeats = allow_playback_repeats
         self.save_on_error = save_on_error
@@ -1004,6 +1006,16 @@ class TapeSession:
             latency_ms=latency_ms,
             llm=llm_summary,
         )
+        if self.on_record is not None:
+            transformed = self.on_record(interaction)
+            if transformed is None:
+                return interaction
+            if not isinstance(transformed, Interaction):
+                raise TypeError(
+                    f"on_record callback must return Interaction or None, "
+                    f"got {type(transformed).__name__}"
+                )
+            interaction = transformed
         with self._lock:
             self._interactions.append(interaction)
             self._recorded.append(interaction)
@@ -1600,6 +1612,7 @@ def tape(
     match_headers: Iterable[str] = (),
     custom_matcher: Callable[[RecordedRequest, RecordedRequest], bool] | None = None,
     on_replay: Callable[[Interaction, int], Interaction | None] | None = None,
+    on_record: Callable[[Interaction], Interaction | None] | None = None,
     replay_latency_scale: float = 0.0,
     allow_playback_repeats: bool = False,
     save_on_error: bool = False,
@@ -1630,6 +1643,7 @@ def tape(
         match_headers=match_headers,
         custom_matcher=custom_matcher,
         on_replay=on_replay,
+        on_record=on_record,
         replay_latency_scale=replay_latency_scale,
         allow_playback_repeats=allow_playback_repeats,
         save_on_error=save_on_error,
