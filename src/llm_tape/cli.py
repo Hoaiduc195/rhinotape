@@ -1496,6 +1496,47 @@ def _cmd_split(
     return 0
 
 
+def _cmd_serve(
+    source: Path,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8787,
+    allow_repeats: bool = True,
+    latency_scale: float = 0.0,
+) -> int:
+    """Start a local HTTP replay server serving recorded cassette interaction(s)."""
+    from llm_tape.server import TapeReplayServer
+
+    if not source.exists():
+        print(f"Error: path not found: {source}", file=sys.stderr)
+        return 1
+    try:
+        server = TapeReplayServer(
+            source,
+            host=host,
+            port=port,
+            allow_playback_repeats=allow_repeats,
+            replay_latency_scale=latency_scale,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    server.start()
+    st = server.stats()
+    print(f"Serving {st['loaded_interactions']} interaction(s) at {server.url} (Ctrl+C to stop)...")
+    try:
+        import time
+
+        while True:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\nStopping llm-tape replay server.")
+    finally:
+        server.stop()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llm-tape",
@@ -1803,6 +1844,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write split cassettes as .tape.json.gz.",
     )
 
+    p_serve = sub.add_parser(
+        "serve",
+        help="Start a local HTTP replay server backed by a cassette file or directory.",
+    )
+    p_serve.add_argument("source", type=Path, help="Cassette file or directory to serve.")
+    p_serve.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1).")
+    p_serve.add_argument("--port", type=int, default=8787, help="Bind port (default: 8787).")
+    p_serve.add_argument(
+        "--no-repeats",
+        action="store_true",
+        help="Consume each recorded interaction only once.",
+    )
+    p_serve.add_argument(
+        "--latency-scale",
+        type=float,
+        default=0.0,
+        help="Scale factor for replaying recorded latencies (default: 0.0).",
+    )
+
     return parser
 
 
@@ -1876,6 +1936,14 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_merge(args.sources, output=args.output, deduplicate=args.deduplicate)
         if args.command == "split":
             return _cmd_split(args.source, output_dir=args.output_dir, compress=args.compress)
+        if args.command == "serve":
+            return _cmd_serve(
+                args.source,
+                host=args.host,
+                port=args.port,
+                allow_repeats=not args.no_repeats,
+                latency_scale=args.latency_scale,
+            )
     except (TapeError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
