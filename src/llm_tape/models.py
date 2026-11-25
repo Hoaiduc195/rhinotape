@@ -42,6 +42,19 @@ class CorruptCassetteError(TapeError):
 class UnmatchedRequestError(TapeError):
     """Raised when an outgoing request does not match any recorded interaction."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        incoming: RecordedRequest | None = None,
+        closest: RecordedRequest | None = None,
+        diff_text: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.incoming = incoming
+        self.closest = closest
+        self.diff_text = diff_text
+
 
 class TapeAssertionError(AssertionError, TapeError):
     """Raised when a tape assertion (budget, tokens, tool calls) fails."""

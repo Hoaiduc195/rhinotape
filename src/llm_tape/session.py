@@ -44,6 +44,7 @@ from llm_tape.scrubbing import (
     compile_patterns,
     decode_body_with_encoding,
     encode_body_with_encoding,
+    find_closest_request,
     fingerprint_request,
     format_request_diff,
     redact_body,
@@ -831,6 +832,12 @@ class TapeSession:
                         self._consumed_indices.add(orig_idx)
                         break
                 if matched is None:
+                    closest = find_closest_request(
+                        recorded_req,
+                        self._all_loaded_requests,
+                        ignore_fields=self.ignore_fields,
+                        ignore_query_params=self.ignore_query_params,
+                    )
                     diff_text = format_request_diff(
                         recorded_req,
                         self._all_loaded_requests,
@@ -840,7 +847,10 @@ class TapeSession:
                     raise UnmatchedRequestError(
                         f"No recorded interaction matched custom_matcher for "
                         f"{recorded_req.method} {recorded_req.url} in cassette "
-                        f"{self.cassette_path}.\nClosest recorded request diff:\n{diff_text}"
+                        f"{self.cassette_path}.\nClosest recorded request diff:\n{diff_text}",
+                        incoming=recorded_req,
+                        closest=closest,
+                        diff_text=diff_text,
                     )
                 interaction = matched
             else:
@@ -853,8 +863,15 @@ class TapeSession:
                             f"cassette {self.cassette_path} only recorded {total} matching "
                             f"call(s), but code made call #{total + 1}. "
                             "Pass allow_playback_repeats=True if repeated identical calls are "
-                            "expected."
+                            "expected.",
+                            incoming=recorded_req,
                         )
+                    closest = find_closest_request(
+                        recorded_req,
+                        self._all_loaded_requests,
+                        ignore_fields=self.ignore_fields,
+                        ignore_query_params=self.ignore_query_params,
+                    )
                     diff_text = format_request_diff(
                         recorded_req,
                         self._all_loaded_requests,
@@ -864,7 +881,10 @@ class TapeSession:
                     raise UnmatchedRequestError(
                         f"No recorded interaction matches {recorded_req.method} {recorded_req.url} "
                         f"(fingerprint={recorded_req.fingerprint}) in cassette "
-                        f"{self.cassette_path}.\nClosest recorded request diff:\n{diff_text}"
+                        f"{self.cassette_path}.\nClosest recorded request diff:\n{diff_text}",
+                        incoming=recorded_req,
+                        closest=closest,
+                        diff_text=diff_text,
                     )
 
                 orig_idx, interaction = (
