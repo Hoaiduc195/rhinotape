@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import csv
 import io
 import json
@@ -15,6 +16,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from llm_tape._version import __version__ as _VERSION
 from llm_tape.cassette import Cassette, iter_cassette_files
@@ -999,49 +1001,61 @@ def _write_text_atomic(path: Path, text: str) -> None:
                 pass
 
 
+def _get_header_ci(headers: dict[str, str], name: str, default: str = "") -> str:
+    target = name.lower()
+    for k, v in headers.items():
+        if k.lower() == target:
+            return v
+    return default
+
+
 def _render_har(cassettes: list[Cassette]) -> str:
     entries: list[dict[str, Any]] = []
     for cassette in cassettes:
         started = cassette.recorded_at or datetime.now(timezone.utc).isoformat()
         for inter in cassette.interactions:
-            req_mime = inter.request.headers.get(
-                "content-type", inter.request.headers.get("Content-Type", "application/json")
-            )
+            req_mime = _get_header_ci(inter.request.headers, "content-type", "application/json")
             req_text = (
                 json.dumps(inter.request.body, ensure_ascii=False)
                 if isinstance(inter.request.body, (dict, list))
                 else ("" if inter.request.body is None else str(inter.request.body))
             )
-            resp_mime = inter.response.headers.get(
-                "content-type", inter.response.headers.get("Content-Type", "application/json")
-            )
+            resp_mime = _get_header_ci(inter.response.headers, "content-type", "application/json")
             if inter.response.stream_chunks is not None:
                 resp_text = "".join(inter.response.stream_chunks)
                 resp_encoding: str | None = None
+                resp_size = len(resp_text.encode("utf-8"))
             elif inter.response.body_encoding == "base64":
                 resp_text = str(inter.response.body or "")
                 resp_encoding = "base64"
+                try:
+                    resp_size = len(base64.b64decode(resp_text))
+                except (ValueError, TypeError):
+                    resp_size = len(resp_text.encode("utf-8"))
             elif isinstance(inter.response.body, (dict, list)):
                 resp_text = json.dumps(inter.response.body, ensure_ascii=False)
                 resp_encoding = None
+                resp_size = len(resp_text.encode("utf-8"))
             else:
                 resp_text = "" if inter.response.body is None else str(inter.response.body)
                 resp_encoding = None
+                resp_size = len(resp_text.encode("utf-8"))
 
             resp_content: dict[str, Any] = {
-                "size": len(resp_text.encode("utf-8")),
+                "size": resp_size,
                 "mimeType": resp_mime,
                 "text": resp_text,
             }
             if resp_encoding is not None:
                 resp_content["encoding"] = resp_encoding
 
+            query_pairs = parse_qsl(urlsplit(inter.request.url).query, keep_blank_values=True)
             har_req: dict[str, Any] = {
                 "method": inter.request.method,
                 "url": inter.request.url,
                 "httpVersion": "HTTP/1.1",
                 "headers": [{"name": k, "value": v} for k, v in inter.request.headers.items()],
-                "queryString": [],
+                "queryString": [{"name": k, "value": v} for k, v in query_pairs],
                 "cookies": [],
                 "headersSize": -1,
                 "bodySize": len(req_text.encode("utf-8")),
@@ -1169,6 +1183,7 @@ def _cmd_convert(
     to_format: str,
     delete_source: bool = False,
     dry_run: bool = False,
+    force: bool = False,
 ) -> int:
     """Convert cassettes between plain .tape.json and gzip-compressed .tape.json.gz."""
     if not target.exists():
@@ -1186,6 +1201,7 @@ def _cmd_convert(
         ]
 
     converted = 0
+    conflicts = 0
     for file_path in files:
         is_gz = file_path.name.lower().endswith(".gz")
         if (to_format == "gzip" and is_gz) or (to_format == "json" and not is_gz):
@@ -1193,6 +1209,13 @@ def _cmd_convert(
         stem = _cassette_stem(file_path)
         new_ext = ".tape.json.gz" if to_format == "gzip" else ".tape.json"
         dest_path = file_path.with_name(f"{stem}{new_ext}")
+        if (dest_path.exists() or dest_path.is_symlink()) and not force:
+            conflicts += 1
+            print(
+                f"CONFLICT: destination already exists: {dest_path} (pass --force to overwrite)",
+                file=sys.stderr,
+            )
+            continue
         converted += 1
         if dry_run:
             print(f"WOULD CONVERT: {file_path} -> {dest_path}")
@@ -1206,7 +1229,7 @@ def _cmd_convert(
 
     suffix = " (dry-run)" if dry_run else ""
     print(f"Done: {converted}/{len(files)} cassette(s) converted to {to_format}{suffix}.")
-    return 0
+    return 1 if conflicts else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1426,6 +1449,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Preview conversions without modifying files.",
     )
+    p_convert.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing destination cassette files on collision.",
+    )
 
     return parser
 
@@ -1484,6 +1512,7 @@ def main(argv: list[str] | None = None) -> int:
                 to_format=args.to_format,
                 delete_source=args.delete_source,
                 dry_run=args.dry_run,
+                force=args.force,
             )
     except (TapeError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)

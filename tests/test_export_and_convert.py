@@ -128,3 +128,63 @@ def test_cli_convert_gzip_json_and_multi_file_verify(
     capsys.readouterr()
     assert p1.exists() and not gz1.exists()
     assert Cassette.load(p1).interactions[0].llm.model == "o3"
+
+
+def test_convert_collision_protection_and_har_spec_fixes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import base64
+
+    # P1: collision refuses to overwrite without --force, succeeds with --force
+    tapes_dir = tmp_path / "collide"
+    plain = _make_sample_cassette(tapes_dir / "dup.tape.json")
+    gz = _make_sample_cassette(tapes_dir / "dup.tape.json.gz")
+    orig_gz_bytes = gz.read_bytes()
+
+    assert main(["convert", str(tapes_dir), "--to", "gzip", "--delete-source"]) == 1
+    assert "CONFLICT:" in capsys.readouterr().err
+    assert plain.exists()
+    assert gz.read_bytes() == orig_gz_bytes
+
+    assert main(["convert", str(tapes_dir), "--to", "gzip", "--delete-source", "--force"]) == 0
+    capsys.readouterr()
+    assert not plain.exists()
+    assert gz.exists()
+
+    # P2: HAR queryString, decoded base64 content.size, and case-insensitive Content-Type
+    raw_bin = b"\x89PNG\r\n\x1a\n123456"
+    b64_str = base64.b64encode(raw_bin).decode("ascii")
+    har_tape = tmp_path / "har_edge.tape.json"
+    Cassette(
+        path=har_tape,
+        interactions=[
+            Interaction(
+                request=RecordedRequest(
+                    method="POST",
+                    url="https://api.example.com/v1/gen?api-version=2025-01&key=[REDACTED]",
+                    headers={"CONTENT-TYPE": "application/json"},
+                    body={"x": 1},
+                    fingerprint="fp_har",
+                    body_encoding="json",
+                ),
+                response=RecordedResponse(
+                    status_code=200,
+                    headers={"CONTENT-TYPE": "image/png"},
+                    body=b64_str,
+                    body_encoding="base64",
+                ),
+                latency_ms=12.0,
+            )
+        ],
+    ).save()
+
+    assert main(["export", str(har_tape), "--format", "har"]) == 0
+    har = json.loads(capsys.readouterr().out)
+    entry = har["log"]["entries"][0]
+    assert entry["request"]["queryString"] == [
+        {"name": "api-version", "value": "2025-01"},
+        {"name": "key", "value": "[REDACTED]"},
+    ]
+    assert entry["response"]["content"]["mimeType"] == "image/png"
+    assert entry["response"]["content"]["encoding"] == "base64"
+    assert entry["response"]["content"]["size"] == len(raw_bin)
