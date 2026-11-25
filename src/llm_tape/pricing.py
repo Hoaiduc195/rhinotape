@@ -258,3 +258,28 @@ def estimate_cost_usd(
         cached_input_tokens=cached_input_tokens,
         cache_creation_tokens=cache_creation_tokens,
     )
+
+
+def estimate_cache_savings_usd(
+    model: str | None,
+    input_tokens: int,
+    output_tokens: int = 0,
+    custom_pricing: dict[str, ModelPrice] | None = None,
+    *,
+    cached_input_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+) -> float:
+    """Estimate net USD saved by prompt caching compared to uncached input pricing."""
+    if not model or (cached_input_tokens <= 0 and cache_creation_tokens <= 0):
+        return 0.0
+    price = _resolve_model_price(model, custom_pricing)
+    if price is None:
+        return 0.0
+    uncached = price.compute(input_tokens, output_tokens)
+    actual = price.compute(
+        input_tokens,
+        output_tokens,
+        cached_input_tokens=cached_input_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+    )
+    return round(uncached - actual, 10)

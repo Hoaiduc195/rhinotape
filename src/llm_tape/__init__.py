@@ -16,7 +16,13 @@ from llm_tape.models import (
     UnmatchedRequestError,
     Usage,
 )
-from llm_tape.pricing import DEFAULT_PRICING, ModelPrice, estimate_cost_usd, load_pricing_file
+from llm_tape.pricing import (
+    DEFAULT_PRICING,
+    ModelPrice,
+    estimate_cache_savings_usd,
+    estimate_cost_usd,
+    load_pricing_file,
+)
 from llm_tape.scrubbing import (
     DEFAULT_MATCH_ON,
     PII_CREDIT_CARD,
@@ -65,6 +71,7 @@ __all__ = [
     "Usage",
     "VALID_MATCH_ON",
     "__version__",
+    "estimate_cache_savings_usd",
     "estimate_cost_usd",
     "load_pricing_file",
     "redact_body",
