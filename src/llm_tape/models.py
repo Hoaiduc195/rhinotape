@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -69,7 +69,11 @@ class ToolCall:
     call_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "name": self.name,
+            "arguments": self.arguments,
+            "call_id": self.call_id,
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ToolCall:
@@ -172,7 +176,14 @@ class RecordedRequest:
     body_encoding: str = "json"  # "json" | "text" | "base64" | "empty"
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "method": self.method,
+            "url": self.url,
+            "headers": self.headers,
+            "body": self.body,
+            "fingerprint": self.fingerprint,
+            "body_encoding": self.body_encoding,
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RecordedRequest:
