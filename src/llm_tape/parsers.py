@@ -15,6 +15,43 @@ _GEMINI_MODEL_RE = re.compile(r"/models/([^/:?]+)")
 _AZURE_DEPLOYMENT_RE = re.compile(r"/openai/deployments/([^/?]+)")
 _BEDROCK_MODEL_RE = re.compile(r"/model/([^/?]+)/converse")
 
+_GEMINI_URL_TOKENS: tuple[str, ...] = (
+    "generativelanguage.googleapis.com",
+    "aiplatform.googleapis.com",
+    ":generatecontent",
+    ":streamgeneratecontent",
+)
+_COHERE_URL_TOKENS: tuple[str, ...] = ("cohere.com", "cohere.ai")
+_OLLAMA_PATH_SUFFIXES: tuple[str, ...] = ("/api/chat", "/api/generate")
+_OPENAI_URL_TOKENS: tuple[str, ...] = (
+    "openai.com",
+    "openai.azure.com",
+    "openrouter.ai",
+    "deepseek.com",
+    "api.groq.com",
+    "api.mistral.ai",
+    "api.together.xyz",
+    "api.fireworks.ai",
+    "api.x.ai",
+    "api.perplexity.ai",
+    "api-inference.huggingface.co",
+    "router.huggingface.co",
+    "/chat/completions",
+    "/fim/completions",
+    "/responses",
+    "/embeddings",
+    "/audio/transcriptions",
+    "/audio/translations",
+    "/audio/speech",
+    "/images/generations",
+    "/images/edits",
+)
+_ANTHROPIC_SSE_EVENTS: frozenset[str] = frozenset(
+    {"message_start", "content_block_start", "message_delta"}
+)
+_ANTHROPIC_SSE_TYPES: frozenset[str] = frozenset({"message_start", "content_block_delta"})
+_COHERE_SSE_EVENTS: frozenset[str] = frozenset({"content-delta", "message-end", "tool-call-start"})
+
 
 def _parse_json_args(raw: Any) -> dict[str, Any] | str:
     if isinstance(raw, dict):
@@ -39,43 +76,17 @@ def _detect_provider(
     lower_url = url.lower()
     if "anthropic.com" in lower_url:
         return "anthropic"
-    if (
-        "generativelanguage.googleapis.com" in lower_url
-        or "aiplatform.googleapis.com" in lower_url
-        or ":generatecontent" in lower_url
-        or ":streamgeneratecontent" in lower_url
-    ):
+    if any(tok in lower_url for tok in _GEMINI_URL_TOKENS):
         return "gemini"
     if "/converse" in lower_url and ("bedrock" in lower_url or "/model/" in lower_url):
         return "bedrock"
-    url_path = urlsplit(lower_url).path.rstrip("/")
-    if url_path.endswith(("/api/chat", "/api/generate")):
-        return "ollama"
-    if "cohere.com" in lower_url or "cohere.ai" in lower_url:
-        return "cohere"
-    if (
-        "openai.com" in lower_url
-        or "openai.azure.com" in lower_url
-        or "openrouter.ai" in lower_url
-        or "deepseek.com" in lower_url
-        or "api.groq.com" in lower_url
-        or "api.mistral.ai" in lower_url
-        or "api.together.xyz" in lower_url
-        or "api.fireworks.ai" in lower_url
-        or "api.x.ai" in lower_url
-        or "api.perplexity.ai" in lower_url
-        or "api-inference.huggingface.co" in lower_url
-        or "router.huggingface.co" in lower_url
-        or "/chat/completions" in lower_url
-        or "/fim/completions" in lower_url
-        or "/responses" in lower_url
-        or "/embeddings" in lower_url
-        or "/audio/transcriptions" in lower_url
-        or "/audio/translations" in lower_url
-        or "/audio/speech" in lower_url
-        or "/images/generations" in lower_url
-        or "/images/edits" in lower_url
+    if "/api/" in lower_url and urlsplit(lower_url).path.rstrip("/").endswith(
+        _OLLAMA_PATH_SUFFIXES
     ):
+        return "ollama"
+    if any(tok in lower_url for tok in _COHERE_URL_TOKENS):
+        return "cohere"
+    if any(tok in lower_url for tok in _OPENAI_URL_TOKENS):
         return "openai"
 
     if isinstance(response_body, dict):
@@ -107,15 +118,15 @@ def _detect_provider(
             return "openai"
 
     for event_name, payload in sse_events:
-        if event_name in {"message_start", "content_block_start", "message_delta"}:
+        if event_name in _ANTHROPIC_SSE_EVENTS:
             return "anthropic"
-        if event_name in {"content-delta", "message-end", "tool-call-start"}:
+        if event_name in _COHERE_SSE_EVENTS:
             return "cohere"
         if isinstance(payload, dict):
             ptype = payload.get("type")
-            if ptype in {"message_start", "content_block_delta"}:
+            if ptype in _ANTHROPIC_SSE_TYPES:
                 return "anthropic"
-            if ptype in {"content-delta", "message-end", "tool-call-start"}:
+            if ptype in _COHERE_SSE_EVENTS:
                 return "cohere"
             if "candidates" in payload:
                 return "gemini"
