@@ -1559,6 +1559,24 @@ class TapeSession:
                 f"Expected {expected} tool call(s), but observed {actual}: {self.tool_names}."
             )
 
+    def assert_cache_hit_rate_at_least(self, min_pct: float) -> None:
+        """Assert that prompt cache hit rate (cached_input / input * 100) is >= `min_pct`."""
+        if not math.isfinite(min_pct) or min_pct < 0.0 or min_pct > 100.0:
+            raise ValueError("min_pct must be a finite number between 0.0 and 100.0")
+        usage = self.total_usage
+        if usage.input_tokens <= 0:
+            if min_pct > 0.0:
+                raise TapeAssertionError(
+                    f"Expected cache hit rate >= {min_pct:.1f}%, but total input_tokens is 0."
+                )
+            return
+        pct = (usage.cached_input_tokens / usage.input_tokens) * 100.0
+        if pct + 1e-9 < min_pct:
+            raise TapeAssertionError(
+                f"Prompt cache hit rate {pct:.1f}% is below minimum {min_pct:.1f}% "
+                f"({usage.cached_input_tokens}/{usage.input_tokens} cached input tokens)."
+            )
+
 
 def tape(
     cassette_path: str | Path,
