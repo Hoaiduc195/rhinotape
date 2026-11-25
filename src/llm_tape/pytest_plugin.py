@@ -411,30 +411,10 @@ def pytest_runtest_makereport(
         setattr(item, _FAILED_ATTR, bool(rep.failed))
 
 
-@pytest.fixture
-def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, None]:
-    """Provide an active TapeSession scoped to the current pytest test."""
-    cli_mode = request.config.getoption("--tape-mode")
+def _resolve_cassette_dir(request: pytest.FixtureRequest) -> Path:
     cli_dir = request.config.getoption("--tape-dir")
-    cli_compress = bool(request.config.getoption("--tape-compress"))
-
-    ini_mode = str(request.config.getini("tape_mode") or TapeMode.ONCE.value)
-    ini_dir = str(request.config.getini("tape_dir") or "")
-    ini_compress = bool(request.config.getini("tape_compress"))
-    ini_ignore_localhost = bool(request.config.getini("tape_ignore_localhost"))
-    ini_ignore_hosts = list(request.config.getini("tape_ignore_hosts") or [])
-    ini_ignore_fields = list(request.config.getini("tape_ignore_fields") or [])
-    ini_ignore_query_params = list(request.config.getini("tape_ignore_query_params") or [])
-
-    marker = request.node.get_closest_marker("tape")
-    marker_kwargs = marker.kwargs if marker else {}
-    marker_name = marker_kwargs.get("name")
-    marker_mode = marker_kwargs.get("mode")
-
-    env_mode = os.environ.get("LLM_TAPE_MODE", "").strip() or None
     env_dir = os.environ.get("LLM_TAPE_DIR", "").strip() or None
-    mode = TapeMode.coerce(marker_mode or cli_mode or env_mode or ini_mode)
-
+    ini_dir = str(request.config.getini("tape_dir") or "")
     effective_dir = cli_dir or env_dir or ini_dir or None
     test_path = Path(str(request.path))
     if effective_dir:
@@ -450,6 +430,37 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
     else:
         base_dir = test_path.parent / "tapes"
         file_slug = _sanitize_segment(test_path.stem, unique_seed=str(test_path))
+    return base_dir / file_slug
+
+
+@pytest.fixture
+def llm_tape_dir(request: pytest.FixtureRequest) -> Path:
+    """Return the resolved cassette directory Path for the current test module."""
+    return _resolve_cassette_dir(request)
+
+
+@pytest.fixture
+def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, None]:
+    """Provide an active TapeSession scoped to the current pytest test."""
+    cli_mode = request.config.getoption("--tape-mode")
+    cli_compress = bool(request.config.getoption("--tape-compress"))
+
+    ini_mode = str(request.config.getini("tape_mode") or TapeMode.ONCE.value)
+    ini_compress = bool(request.config.getini("tape_compress"))
+    ini_ignore_localhost = bool(request.config.getini("tape_ignore_localhost"))
+    ini_ignore_hosts = list(request.config.getini("tape_ignore_hosts") or [])
+    ini_ignore_fields = list(request.config.getini("tape_ignore_fields") or [])
+    ini_ignore_query_params = list(request.config.getini("tape_ignore_query_params") or [])
+
+    marker = request.node.get_closest_marker("tape")
+    marker_kwargs = marker.kwargs if marker else {}
+    marker_name = marker_kwargs.get("name")
+    marker_mode = marker_kwargs.get("mode")
+
+    env_mode = os.environ.get("LLM_TAPE_MODE", "").strip() or None
+    mode = TapeMode.coerce(marker_mode or cli_mode or env_mode or ini_mode)
+
+    cassette_dir = _resolve_cassette_dir(request)
 
     # Include class name when no explicit marker name is set to avoid TestA.test_x vs TestB.test_x
     if marker_name:
@@ -469,7 +480,7 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
         else (cli_compress or ini_compress)
     )
     ext = ".tape.json.gz" if compress else ".tape.json"
-    cassette_path = base_dir / file_slug / f"{test_slug}{ext}"
+    cassette_path = cassette_dir / f"{test_slug}{ext}"
 
     ignore_localhost = (
         bool(marker_kwargs["ignore_localhost"])
