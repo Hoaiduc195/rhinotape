@@ -1009,13 +1009,19 @@ def _cmd_redact(
                 base_thinking = inter.llm.thinking
                 base_calls = inter.llm.tool_calls
 
-            new_llm_text = redact_text(base_text, patterns) if patterns else base_text
-            new_llm_thinking = redact_text(base_thinking, patterns) if patterns else base_thinking
+            new_llm_text = (
+                redact_text(base_text, effective_patterns) if effective_patterns else base_text
+            )
+            new_llm_thinking = (
+                redact_text(base_thinking, effective_patterns)
+                if effective_patterns
+                else base_thinking
+            )
             new_tool_calls = tuple(
                 ToolCall(
                     name=tc.name,
                     arguments=redact_body(
-                        tc.arguments, redact_fields=fields, redact_patterns=patterns
+                        tc.arguments, redact_fields=fields, redact_patterns=effective_patterns
                     ),
                     call_id=tc.call_id,
                 )

@@ -38,7 +38,7 @@ def test_pii_presets_and_resolver() -> None:
     sample = (
         "Contact alice@example.com or 415-555-1234, SSN 123-45-6789, "
         "card 4111-2222-3333-4444, ip 192.168.1.42, "
-        "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature12345"
+        "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature1234-"
     )
     redacted = redact_text(sample, resolve_pii_patterns(True))
     assert "alice@example.com" not in redacted
@@ -47,6 +47,7 @@ def test_pii_presets_and_resolver() -> None:
     assert "4111-2222-3333-4444" not in redacted
     assert "192.168.1.42" not in redacted
     assert "eyJhbGciOiJIUzI1NiJ9" not in redacted
+    assert f"{REDACTED}-" not in redacted
     assert redacted.count(REDACTED) == 6
 
 
