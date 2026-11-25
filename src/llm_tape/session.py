@@ -1523,6 +1523,25 @@ class TapeSession:
                 f"(limit: {max_tokens})."
             )
 
+    def assert_streamed(self) -> None:
+        """Assert that at least one interaction occurred and all interactions used SSE streaming."""
+        interactions = self.interactions
+        if not interactions:
+            raise TapeAssertionError("Expected streamed call(s), but no interactions occurred.")
+        non_stream = [idx for idx, i in enumerate(interactions) if not i.llm.is_stream]
+        if non_stream:
+            raise TapeAssertionError(
+                f"Expected all calls to be streamed, but call(s) {non_stream} were non-streaming."
+            )
+
+    def assert_not_streamed(self) -> None:
+        """Assert that no recorded/replayed interaction used SSE streaming."""
+        streamed = [idx for idx, i in enumerate(self.interactions) if i.llm.is_stream]
+        if streamed:
+            raise TapeAssertionError(
+                f"Expected no streamed calls, but call(s) {streamed} used SSE streaming."
+            )
+
 
 def tape(
     cassette_path: str | Path,
