@@ -17,6 +17,7 @@ from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -35,6 +36,7 @@ from llm_tape.models import (
 )
 from llm_tape.parsers import parse_llm_interaction
 from llm_tape.pricing import ModelPrice
+from llm_tape.requests_adapter import acquire_requests_patch, release_requests_patch
 from llm_tape.scrubbing import (
     DEFAULT_MATCH_ON,
     compile_patterns,
@@ -352,6 +354,7 @@ class TapeSession:
         allow_playback_repeats: bool = False,
         save_on_error: bool = False,
         patch_httpx: bool = True,
+        patch_requests: bool = True,
     ) -> None:
         if not math.isfinite(replay_latency_scale) or replay_latency_scale < 0.0:
             raise ValueError("replay_latency_scale must be a finite number >= 0.0")
@@ -378,6 +381,7 @@ class TapeSession:
         self.allow_playback_repeats = allow_playback_repeats
         self.save_on_error = save_on_error
         self.patch_httpx = patch_httpx
+        self.patch_requests = patch_requests
 
         self._lock = threading.Lock()
         self._interactions: list[Interaction] = []
@@ -393,6 +397,7 @@ class TapeSession:
         self._active = False
         self._ctx_token: contextvars.Token[TapeSession | None] | None = None
         self._patch_acquired = False
+        self._requests_patch_acquired = False
 
     # --- Lifecycle ---------------------------------------------------------
 
@@ -456,11 +461,18 @@ class TapeSession:
                 self._all_loaded_requests.append(interaction.request)
 
     def _install_httpx_patch(self) -> None:
-        if not self.patch_httpx or self.mode is TapeMode.NONE:
+        if self.mode is TapeMode.NONE or (not self.patch_httpx and not self.patch_requests):
             return
         self._ctx_token = _active_session.set(self)
-        _acquire_httpx_patch()
-        self._patch_acquired = True
+        try:
+            if self.patch_httpx:
+                _acquire_httpx_patch()
+                self._patch_acquired = True
+            if self.patch_requests:
+                self._requests_patch_acquired = acquire_requests_patch(_active_session.get)
+        except Exception:
+            self._uninstall_httpx_patch()
+            raise
 
     def _uninstall_httpx_patch(self) -> None:
         try:
@@ -468,12 +480,17 @@ class TapeSession:
                 _release_httpx_patch()
                 self._patch_acquired = False
         finally:
-            if self._ctx_token is not None:
-                try:
-                    _active_session.reset(self._ctx_token)
-                except ValueError:
-                    pass
-                self._ctx_token = None
+            try:
+                if self._requests_patch_acquired:
+                    release_requests_patch()
+                    self._requests_patch_acquired = False
+            finally:
+                if self._ctx_token is not None:
+                    try:
+                        _active_session.reset(self._ctx_token)
+                    except ValueError:
+                        pass
+                    self._ctx_token = None
 
     def _finalize(self, *, exc_occurred: bool = False) -> None:
         try:
@@ -522,6 +539,14 @@ class TapeSession:
 
     # --- Filtering & Matching ----------------------------------------------
 
+    def _should_ignore_url(self, url: str) -> bool:
+        host = (urlsplit(url).hostname or "").lower()
+        if self.ignore_localhost and host in _LOCALHOST_HOSTS:
+            return True
+        if any(fnmatch.fnmatch(host, pattern) for pattern in self.ignore_hosts):
+            return True
+        return False
+
     def _should_ignore(self, request: httpx.Request) -> bool:
         host = (request.url.host or "").lower()
         if self.ignore_localhost and host in _LOCALHOST_HOSTS:
@@ -532,9 +557,16 @@ class TapeSession:
             return True
         return False
 
-    def _build_recorded_request(self, request: httpx.Request, body_bytes: bytes) -> RecordedRequest:
-        clean_url = scrub_url(str(request.url), self.extra_sensitive_query_params)
-        clean_headers = scrub_headers(request.headers.items(), self.extra_sensitive_headers)
+    def _build_recorded_request_parts(
+        self,
+        *,
+        method: str,
+        url: str,
+        headers: Iterable[tuple[str, str]],
+        body_bytes: bytes,
+    ) -> RecordedRequest:
+        clean_url = scrub_url(url, self.extra_sensitive_query_params)
+        clean_headers = scrub_headers(headers, self.extra_sensitive_headers)
         decoded_body, body_encoding = decode_body_with_encoding(body_bytes)
         if self._has_body_redaction and body_encoding not in {"base64", "empty"}:
             decoded_body = redact_body(
@@ -544,7 +576,7 @@ class TapeSession:
                 scrub_body=self.scrub_body,
             )
         fp = fingerprint_request(
-            request.method,
+            method,
             clean_url,
             decoded_body,
             headers=clean_headers,
@@ -553,12 +585,20 @@ class TapeSession:
             match_on=self.match_on,
         )
         return RecordedRequest(
-            method=request.method.upper(),
+            method=method.upper(),
             url=clean_url,
             headers=clean_headers,
             body=decoded_body,
             fingerprint=fp,
             body_encoding=body_encoding,
+        )
+
+    def _build_recorded_request(self, request: httpx.Request, body_bytes: bytes) -> RecordedRequest:
+        return self._build_recorded_request_parts(
+            method=request.method,
+            url=str(request.url),
+            headers=request.headers.items(),
+            body_bytes=body_bytes,
         )
 
     def _pop_replay_interaction(self, recorded_req: RecordedRequest) -> Interaction:
@@ -703,17 +743,23 @@ class TapeSession:
             request, interaction, stream=stream, chunk_delay_s=chunk_delay_s
         )
 
-    def _record_interaction(
+    def _record_interaction_parts(
         self,
+        *,
         recorded_req: RecordedRequest,
-        response: httpx.Response,
+        status_code: int,
+        response_headers: Iterable[tuple[str, str]],
         response_bytes: bytes | None,
         latency_ms: float,
-        *,
         stream_chunks: list[str] | None = None,
     ) -> Interaction:
-        clean_resp_headers = scrub_headers(response.headers.items(), self.extra_sensitive_headers)
-        content_type = response.headers.get("content-type", "")
+        headers_list = list(response_headers)
+        clean_resp_headers = scrub_headers(headers_list, self.extra_sensitive_headers)
+        content_type = ""
+        for k, v in headers_list:
+            if k.lower() == "content-type":
+                content_type = v
+                break
 
         if stream_chunks is not None:
             if self._compiled_redact_patterns:
@@ -734,7 +780,7 @@ class TapeSession:
                     stream_chunks = per_chunk
             chunks_tuple = tuple(stream_chunks)
             recorded_resp = RecordedResponse(
-                status_code=response.status_code,
+                status_code=status_code,
                 headers=clean_resp_headers,
                 body=None,
                 body_encoding="stream",
@@ -758,7 +804,7 @@ class TapeSession:
                     scrub_body=self.scrub_body,
                 )
             recorded_resp = RecordedResponse(
-                status_code=response.status_code,
+                status_code=status_code,
                 headers=clean_resp_headers,
                 body=decoded_resp_body,
                 body_encoding=resp_encoding,
@@ -781,6 +827,24 @@ class TapeSession:
             self._interactions.append(interaction)
             self._recorded.append(interaction)
         return interaction
+
+    def _record_interaction(
+        self,
+        recorded_req: RecordedRequest,
+        response: httpx.Response,
+        response_bytes: bytes | None,
+        latency_ms: float,
+        *,
+        stream_chunks: list[str] | None = None,
+    ) -> Interaction:
+        return self._record_interaction_parts(
+            recorded_req=recorded_req,
+            status_code=response.status_code,
+            response_headers=response.headers.items(),
+            response_bytes=response_bytes,
+            latency_ms=latency_ms,
+            stream_chunks=stream_chunks,
+        )
 
     def handle_sync(
         self,
@@ -1094,6 +1158,7 @@ def tape(
     allow_playback_repeats: bool = False,
     save_on_error: bool = False,
     patch_httpx: bool = True,
+    patch_requests: bool = True,
 ) -> TapeSession:
     """Create a TapeSession context manager for recording/replaying LLM calls."""
     return TapeSession(
@@ -1116,6 +1181,7 @@ def tape(
         allow_playback_repeats=allow_playback_repeats,
         save_on_error=save_on_error,
         patch_httpx=patch_httpx,
+        patch_requests=patch_requests,
     )
 
 
