@@ -68,6 +68,11 @@ def _detect_provider(
         or "/fim/completions" in lower_url
         or "/responses" in lower_url
         or "/embeddings" in lower_url
+        or "/audio/transcriptions" in lower_url
+        or "/audio/translations" in lower_url
+        or "/audio/speech" in lower_url
+        or "/images/generations" in lower_url
+        or "/images/edits" in lower_url
     ):
         return "openai"
 
@@ -207,6 +212,13 @@ def _parse_openai_json(
             )
         elif item_type == "message":
             texts.extend(_extract_openai_text(item.get("content")))
+
+    if not texts and isinstance(response_body.get("text"), str) and response_body["text"]:
+        texts.append(response_body["text"])
+    elif not texts and isinstance(response_body.get("data"), list):
+        for item in response_body["data"]:
+            if isinstance(item, dict) and isinstance(item.get("revised_prompt"), str):
+                texts.append(item["revised_prompt"])
 
     cost = estimate_cost_usd(
         model,
