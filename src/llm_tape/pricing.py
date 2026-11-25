@@ -76,6 +76,9 @@ DEFAULT_PRICING: dict[str, ModelPrice] = {
     # Mistral
     "mistral-large": ModelPrice(2.00, 6.00),
     "mistral-small": ModelPrice(0.10, 0.30),
+    "codestral": ModelPrice(0.30, 0.90),
+    "ministral-8b": ModelPrice(0.10, 0.10),
+    "ministral-3b": ModelPrice(0.04, 0.04),
     # Cohere
     "command-a": ModelPrice(2.50, 10.00),
     "command-r-plus": ModelPrice(2.50, 10.00),

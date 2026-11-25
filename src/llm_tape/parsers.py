@@ -63,6 +63,7 @@ def _detect_provider(
         or "api.together.xyz" in lower_url
         or "api.fireworks.ai" in lower_url
         or "/chat/completions" in lower_url
+        or "/fim/completions" in lower_url
         or "/responses" in lower_url
         or "/embeddings" in lower_url
     ):
