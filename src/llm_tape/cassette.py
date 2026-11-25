@@ -306,39 +306,38 @@ class Cassette:
                 issues.append(f"interactions[{idx}].latency_ms is invalid: {inter.latency_ms}")
         return issues
 
+    def to_json(self, *, indent: int | None = 2) -> str:
+        """Serialize this cassette to a v2 JSON string."""
+        payload = {
+            "schema_version": SCHEMA_VERSION,
+            "recorded_at": self.recorded_at,
+            "metadata": self.metadata,
+            "summary": {
+                "calls": len(self.interactions),
+                "total_tokens": sum(i.llm.usage.total_tokens for i in self.interactions),
+                "estimated_cost_usd": round(
+                    sum(i.llm.estimated_cost_usd for i in self.interactions), 8
+                ),
+            },
+            "interactions": [i.to_dict() for i in self.interactions],
+        }
+        return json.dumps(payload, indent=indent, ensure_ascii=False) + "\n"
+
     @classmethod
-    def load(cls, path: str | Path) -> Cassette:
+    def from_json(cls, raw: str, *, path: str | Path = Path("memory.tape.json")) -> Cassette:
+        """Deserialize a Cassette from a JSON string."""
         cassette_path = Path(path)
-        if not cassette_path.exists():
-            raise TapeNotFoundError(
-                f"Cassette file not found: {cassette_path}. "
-                "Run with mode='once' or mode='record' first to record interactions."
-            )
         try:
-            raw_bytes = cassette_path.read_bytes()
-            if cassette_path.suffix.lower() == ".gz" or raw_bytes[:2] == _GZIP_MAGIC:
-                text = _decompress_gzip_bounded(raw_bytes).decode("utf-8")
-            else:
-                text = raw_bytes.decode("utf-8")
-            raw = json.loads(text)
-        except CorruptCassetteError:
-            raise
-        except (
-            OSError,
-            gzip.BadGzipFile,
-            zlib.error,
-            EOFError,
-            UnicodeDecodeError,
-            json.JSONDecodeError,
-        ) as exc:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
             raise CorruptCassetteError(f"Failed to read cassette {cassette_path}: {exc}") from exc
 
-        if not isinstance(raw, dict):
+        if not isinstance(parsed, dict):
             raise CorruptCassetteError(
                 f"Cassette {cassette_path} must contain a JSON object at top level."
             )
 
-        version = raw.get("schema_version", 1)
+        version = parsed.get("schema_version", 1)
         if (
             isinstance(version, bool)
             or not isinstance(version, int)
@@ -350,11 +349,11 @@ class Cassette:
             )
 
         try:
-            raw_interactions = raw.get("interactions", [])
+            raw_interactions = parsed.get("interactions", [])
             if not isinstance(raw_interactions, list):
                 raise TypeError("'interactions' must be a list")
             interactions = [Interaction.from_dict(item) for item in raw_interactions]
-            raw_meta = raw.get("metadata")
+            raw_meta = parsed.get("metadata")
             if raw_meta is None:
                 metadata: dict[str, Any] = {}
             elif isinstance(raw_meta, dict):
@@ -369,26 +368,33 @@ class Cassette:
         return cls(
             path=cassette_path,
             interactions=interactions,
-            recorded_at=str(raw.get("recorded_at", "")),
+            recorded_at=str(parsed.get("recorded_at", "")),
             metadata=metadata,
         )
 
+    @classmethod
+    def load(cls, path: str | Path) -> Cassette:
+        cassette_path = Path(path)
+        if not cassette_path.exists():
+            raise TapeNotFoundError(
+                f"Cassette file not found: {cassette_path}. "
+                "Run with mode='once' or mode='record' first to record interactions."
+            )
+        try:
+            raw_bytes = cassette_path.read_bytes()
+            if cassette_path.suffix.lower() == ".gz" or raw_bytes[:2] == _GZIP_MAGIC:
+                text = _decompress_gzip_bounded(raw_bytes).decode("utf-8")
+            else:
+                text = raw_bytes.decode("utf-8")
+        except CorruptCassetteError:
+            raise
+        except (OSError, gzip.BadGzipFile, zlib.error, EOFError, UnicodeDecodeError) as exc:
+            raise CorruptCassetteError(f"Failed to read cassette {cassette_path}: {exc}") from exc
+        return cls.from_json(text, path=cassette_path)
+
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "schema_version": SCHEMA_VERSION,
-            "recorded_at": self.recorded_at,
-            "metadata": self.metadata,
-            "summary": {
-                "calls": len(self.interactions),
-                "total_tokens": sum(i.llm.usage.total_tokens for i in self.interactions),
-                "estimated_cost_usd": round(
-                    sum(i.llm.estimated_cost_usd for i in self.interactions), 8
-                ),
-            },
-            "interactions": [i.to_dict() for i in self.interactions],
-        }
-        serialized = (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        serialized = self.to_json(indent=2).encode("utf-8")
         if self.path.suffix.lower() == ".gz":
             data_bytes = gzip.compress(serialized, mtime=0)
         else:
