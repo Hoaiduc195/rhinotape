@@ -162,9 +162,11 @@ class TapeReplayServer:
                 clean_headers = scrub_headers(self.headers.items())
                 inter = server_ref._match(method, self.path, body_bytes, headers=clean_headers)
                 if inter is None:
+                    safe_url = scrub_url(f"http://localhost{self.path}")
+                    safe_path = safe_url[len("http://localhost") :]
                     self._send_json(
                         404,
-                        {"error": "unmatched_request", "method": method, "path": self.path},
+                        {"error": "unmatched_request", "method": method, "path": safe_path},
                     )
                     return
 
