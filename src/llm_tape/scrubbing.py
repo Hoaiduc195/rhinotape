@@ -508,6 +508,77 @@ def _render_request_for_diff(
     return [f"{req.method} {url}", *body_str.splitlines()]
 
 
+def _collect_json_diffs(
+    recorded: Any,
+    incoming: Any,
+    prefix: str,
+    out: list[str],
+    max_paths: int,
+) -> None:
+    if len(out) >= max_paths or recorded == incoming:
+        return
+    if isinstance(recorded, dict) and isinstance(incoming, dict):
+        for key in sorted(set(recorded) | set(incoming)):
+            if len(out) >= max_paths:
+                return
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if key not in recorded:
+                out.append(f"+ {path}")
+            elif key not in incoming:
+                out.append(f"- {path}")
+            else:
+                _collect_json_diffs(recorded[key], incoming[key], path, out, max_paths)
+    elif isinstance(recorded, list) and isinstance(incoming, list):
+        if len(recorded) != len(incoming):
+            out.append(f"~ {prefix or '$'} (len {len(recorded)} -> {len(incoming)})")
+            return
+        for idx, (a, b) in enumerate(zip(recorded, incoming, strict=True)):
+            if len(out) >= max_paths:
+                return
+            path = f"{prefix}[{idx}]" if prefix else f"[{idx}]"
+            _collect_json_diffs(a, b, path, out, max_paths)
+    else:
+        out.append(f"~ {prefix or '$'}")
+
+
+def summarize_json_diff(recorded_body: Any, incoming_body: Any, *, max_paths: int = 8) -> list[str]:
+    """Return a concise list of semantic JSON key-path differences between two bodies."""
+    if not isinstance(recorded_body, (dict, list)) or not isinstance(incoming_body, (dict, list)):
+        return []
+    out: list[str] = []
+    _collect_json_diffs(recorded_body, incoming_body, "", out, max_paths)
+    return out
+
+
+def find_closest_request(
+    incoming: RecordedRequest,
+    candidates: Sequence[RecordedRequest],
+    *,
+    ignore_fields: Iterable[str] = (),
+    ignore_query_params: Iterable[str] = (),
+) -> RecordedRequest | None:
+    """Return the recorded candidate request most similar to `incoming`."""
+    if not candidates:
+        return None
+    incoming_text = "\n".join(
+        _render_request_for_diff(
+            incoming, ignore_fields=ignore_fields, ignore_query_params=ignore_query_params
+        )
+    )
+    return max(
+        candidates,
+        key=lambda c: difflib.SequenceMatcher(
+            None,
+            "\n".join(
+                _render_request_for_diff(
+                    c, ignore_fields=ignore_fields, ignore_query_params=ignore_query_params
+                )
+            ),
+            incoming_text,
+        ).ratio(),
+    )
+
+
 def format_request_diff(
     incoming: RecordedRequest,
     candidates: Sequence[RecordedRequest],
@@ -516,7 +587,7 @@ def format_request_diff(
     ignore_query_params: Iterable[str] = (),
     max_lines: int = 40,
 ) -> str:
-    """Format a compact unified diff against the closest recorded request."""
+    """Format a compact semantic summary + unified diff against the closest recorded request."""
     if not candidates:
         return "(cassette contains no recorded requests)"
 
@@ -525,16 +596,22 @@ def format_request_diff(
     )
     incoming_text = "\n".join(incoming_lines)
 
-    rendered_candidates = [
-        _render_request_for_diff(
-            c, ignore_fields=ignore_fields, ignore_query_params=ignore_query_params
-        )
-        for c in candidates
-    ]
-    recorded_lines = max(
-        rendered_candidates,
-        key=lambda lines: difflib.SequenceMatcher(None, "\n".join(lines), incoming_text).ratio(),
+    best_candidate, recorded_lines = max(
+        (
+            (
+                c,
+                _render_request_for_diff(
+                    c, ignore_fields=ignore_fields, ignore_query_params=ignore_query_params
+                ),
+            )
+            for c in candidates
+        ),
+        key=lambda pair: difflib.SequenceMatcher(None, "\n".join(pair[1]), incoming_text).ratio(),
     )
+    rec_body = strip_ignored_fields(best_candidate.body, ignore_fields)
+    inc_body = strip_ignored_fields(incoming.body, ignore_fields)
+    changed_paths = summarize_json_diff(rec_body, inc_body)
+
     diff_lines = list(
         difflib.unified_diff(
             recorded_lines,
@@ -544,6 +621,8 @@ def format_request_diff(
             lineterm="",
         )
     )
+    if changed_paths:
+        diff_lines = [f"Changed JSON fields: {', '.join(changed_paths)}", *diff_lines]
     if len(diff_lines) > max_lines:
         diff_lines = diff_lines[:max_lines] + ["... (diff truncated)"]
     return "\n".join(diff_lines)
