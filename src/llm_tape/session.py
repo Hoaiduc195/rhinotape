@@ -15,7 +15,7 @@ import threading
 import time
 import zlib
 from collections import defaultdict, deque
-from collections.abc import AsyncIterator, Callable, Iterable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, ParamSpec, TypeVar
 from urllib.parse import urlsplit
@@ -1540,6 +1540,23 @@ class TapeSession:
         if streamed:
             raise TapeAssertionError(
                 f"Expected no streamed calls, but call(s) {streamed} used SSE streaming."
+            )
+
+    def assert_status_codes(self, expected: Sequence[int]) -> None:
+        """Assert that the sequence of HTTP status codes matches `expected`."""
+        actual = [i.response.status_code for i in self.interactions]
+        expected_list = list(expected)
+        if actual != expected_list:
+            raise TapeAssertionError(
+                f"HTTP status code sequence mismatch: expected {expected_list}, got {actual}."
+            )
+
+    def assert_tool_call_count(self, expected: int) -> None:
+        """Assert that the total number of LLM tool calls equals `expected`."""
+        actual = len(self.tool_calls)
+        if actual != expected:
+            raise TapeAssertionError(
+                f"Expected {expected} tool call(s), but observed {actual}: {self.tool_names}."
             )
 
 
