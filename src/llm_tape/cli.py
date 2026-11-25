@@ -1167,6 +1167,10 @@ def _cmd_export(target: Path, *, fmt: str, output: Path | None = None) -> int:
 
     if fmt == "har":
         rendered = _render_har(cassettes)
+    elif fmt == "html":
+        from llm_tape.html_report import render_html_report
+
+        rendered = render_html_report(cassettes, title=f"llm-tape Trace ({target})")
     elif fmt == "csv":
         buf = io.StringIO()
         writer = csv.writer(buf, lineterminator="\n")
@@ -1730,10 +1734,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_export.add_argument(
         "--format",
-        choices=["markdown", "csv", "har"],
+        choices=["markdown", "csv", "har", "html"],
         default="markdown",
         dest="fmt",
-        help="Output format: markdown (default), csv, or har.",
+        help="Output format: markdown (default), csv, har, or html.",
     )
     p_export.add_argument(
         "-o",

@@ -70,6 +70,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Write a machine-readable JSON token/cost report to the given file path.",
     )
     group.addoption(
+        "--tape-html-report",
+        action="store",
+        default=None,
+        help="Write a self-contained HTML trace report of executed cassettes to the given path.",
+    )
+    group.addoption(
         "--tape-max-cost",
         action="store",
         type=float,
@@ -254,6 +260,49 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
                 "budget_violations": violations,
             },
         )
+
+    html_report_path = session.config.getoption("--tape-html-report", default=None)
+    if html_report_path:
+        from llm_tape.cassette import Cassette
+        from llm_tape.html_report import render_html_report
+
+        cassettes: list[Cassette] = []
+        seen_paths: set[str] = set()
+        for entry in entries:
+            cpath_str = str(entry.get("cassette", ""))
+            if not cpath_str or cpath_str in seen_paths:
+                continue
+            seen_paths.add(cpath_str)
+            cpath = Path(cpath_str)
+            if cpath.is_file():
+                try:
+                    cassettes.append(Cassette.load(cpath))
+                except Exception:
+                    continue
+        html_text = render_html_report(cassettes, title="pytest llm-tape Report")
+        out_path = Path(str(html_report_path))
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path: str | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=out_path.parent,
+                prefix=f".{out_path.stem}.",
+                suffix=".tmp",
+                delete=False,
+            ) as tmp:
+                tmp_path = tmp.name
+                tmp.write(html_text.encode("utf-8"))
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_path, out_path)
+            tmp_path = None
+        finally:
+            if tmp_path is not None:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
 
 def pytest_terminal_summary(
