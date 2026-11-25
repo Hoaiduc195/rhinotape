@@ -357,6 +357,45 @@ def redact_body(
     return result
 
 
+def _sort_array_path(node: Any, parts: list[str]) -> None:
+    if not parts:
+        if isinstance(node, list):
+            node.sort(
+                key=lambda item: json.dumps(
+                    item, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                )
+            )
+        return
+    head, *rest = parts
+    if isinstance(node, dict):
+        if head == "*":
+            for val in node.values():
+                _sort_array_path(val, rest)
+        elif head in node:
+            _sort_array_path(node[head], rest)
+    elif isinstance(node, list):
+        if head == "*":
+            for item in node:
+                _sort_array_path(item, rest)
+        elif head.isdigit():
+            idx = int(head)
+            if 0 <= idx < len(node):
+                _sort_array_path(node[idx], rest)
+
+
+def normalize_json_array_order(body: Any, array_paths: Iterable[str]) -> Any:
+    """Return a deep copy of body with JSON arrays at dot-paths sorted canonically."""
+    if not array_paths or not isinstance(body, (dict, list)):
+        return body
+    paths = [p.strip() for p in array_paths if p.strip()]
+    if not paths:
+        return body
+    cloned = copy.deepcopy(body)
+    for field_path in paths:
+        _sort_array_path(cloned, field_path.split("."))
+    return cloned
+
+
 def strip_ignored_fields(body: Any, ignore_fields: Iterable[str]) -> Any:
     """Return a deep copy of body with dot-path fields (supporting '*' wildcards) removed."""
     if not ignore_fields or not isinstance(body, (dict, list)):
@@ -391,6 +430,7 @@ def fingerprint_request(
     headers: Mapping[str, str] | None = None,
     ignore_fields: Iterable[str] = (),
     ignore_query_params: Iterable[str] = (),
+    ignore_json_array_order: Iterable[str] = (),
     match_on: Sequence[str] = DEFAULT_MATCH_ON,
     match_headers: Iterable[str] = (),
 ) -> str:
@@ -401,6 +441,8 @@ def fingerprint_request(
         else scrubbed_url
     )
     filtered_body = strip_ignored_fields(body, ignore_fields)
+    if ignore_json_array_order:
+        filtered_body = normalize_json_array_order(filtered_body, ignore_json_array_order)
     canonical_body = (
         json.dumps(filtered_body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         if isinstance(filtered_body, (dict, list))

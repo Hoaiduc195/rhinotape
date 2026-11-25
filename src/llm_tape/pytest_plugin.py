@@ -439,6 +439,7 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
         ignore_hosts=ignore_hosts,
         ignore_fields=ignore_fields,
         ignore_query_params=ignore_query_params,
+        ignore_json_array_order=marker_kwargs.get("ignore_json_array_order", ()),
         redact_fields=marker_kwargs.get("redact_fields", ()),
         redact_patterns=marker_kwargs.get("redact_patterns", ()),
         redact_pii=marker_kwargs.get("redact_pii", False),

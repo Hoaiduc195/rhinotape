@@ -425,6 +425,7 @@ class TapeSession:
         ignore_request: Callable[[httpx.Request], bool] | None = None,
         ignore_fields: Iterable[str] = (),
         ignore_query_params: Iterable[str] = (),
+        ignore_json_array_order: Iterable[str] = (),
         redact_fields: Iterable[str] = (),
         redact_patterns: Iterable[str | re.Pattern[str]] = (),
         redact_pii: bool | str | Iterable[str] = False,
@@ -454,6 +455,7 @@ class TapeSession:
         self.ignore_request = ignore_request
         self.ignore_fields = tuple(ignore_fields)
         self.ignore_query_params = tuple(ignore_query_params)
+        self.ignore_json_array_order = tuple(ignore_json_array_order)
         self.redact_fields = tuple(redact_fields)
         self.redact_patterns = tuple(redact_patterns)
         self.redact_pii = redact_pii
@@ -568,6 +570,7 @@ class TapeSession:
                     headers=interaction.request.headers,
                     ignore_fields=self.ignore_fields,
                     ignore_query_params=self.ignore_query_params,
+                    ignore_json_array_order=self.ignore_json_array_order,
                     match_on=self.match_on,
                     match_headers=self.match_headers,
                 )
@@ -733,6 +736,7 @@ class TapeSession:
             headers=clean_headers,
             ignore_fields=self.ignore_fields,
             ignore_query_params=self.ignore_query_params,
+            ignore_json_array_order=self.ignore_json_array_order,
             match_on=self.match_on,
             match_headers=self.match_headers,
         )
@@ -1454,6 +1458,7 @@ def tape(
     ignore_request: Callable[[httpx.Request], bool] | None = None,
     ignore_fields: Iterable[str] = (),
     ignore_query_params: Iterable[str] = (),
+    ignore_json_array_order: Iterable[str] = (),
     redact_fields: Iterable[str] = (),
     redact_patterns: Iterable[str | re.Pattern[str]] = (),
     redact_pii: bool | str | Iterable[str] = False,
@@ -1483,6 +1488,7 @@ def tape(
         ignore_request=ignore_request,
         ignore_fields=ignore_fields,
         ignore_query_params=ignore_query_params,
+        ignore_json_array_order=ignore_json_array_order,
         redact_fields=redact_fields,
         redact_patterns=redact_patterns,
         redact_pii=redact_pii,
