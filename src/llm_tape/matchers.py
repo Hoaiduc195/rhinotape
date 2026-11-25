@@ -38,31 +38,34 @@ def _is_subset(subset: Any, superset: Any) -> bool:
 
 
 def match_method() -> RequestMatcher:
-    """Match when incoming and recorded HTTP methods are equal (case-insensitive)."""
+    """Match when recorded and incoming HTTP methods are equal (case-insensitive)."""
 
-    def _matcher(incoming: RecordedRequest, recorded: RecordedRequest) -> bool:
-        return incoming.method.upper() == recorded.method.upper()
+    def _matcher(recorded: RecordedRequest, incoming: RecordedRequest) -> bool:
+        return recorded.method.upper() == incoming.method.upper()
 
     return _matcher
 
 
 def match_path() -> RequestMatcher:
-    """Match when incoming and recorded URL paths are equal."""
+    """Match when recorded and incoming URL paths are equal."""
 
-    def _matcher(incoming: RecordedRequest, recorded: RecordedRequest) -> bool:
-        return urlsplit(incoming.url).path == urlsplit(recorded.url).path
+    def _matcher(recorded: RecordedRequest, incoming: RecordedRequest) -> bool:
+        return urlsplit(recorded.url).path == urlsplit(incoming.url).path
 
     return _matcher
 
 
 def match_json_subset(keys: Iterable[str] | None = None) -> RequestMatcher:
-    """Match JSON bodies either on specific dot-path `keys` or recursive dict subset."""
+    """Match JSON bodies either on specific dot-path `keys` or recursive dict subset.
+
+    When `keys` is None, returns True iff `recorded.body` is a recursive subset of `incoming.body`.
+    """
     key_tuple = tuple(k.strip() for k in keys if k.strip()) if keys is not None else None
 
-    def _matcher(incoming: RecordedRequest, recorded: RecordedRequest) -> bool:
+    def _matcher(recorded: RecordedRequest, incoming: RecordedRequest) -> bool:
         if key_tuple is not None:
             return all(
-                _get_dot_path(incoming.body, k) == _get_dot_path(recorded.body, k)
+                _get_dot_path(recorded.body, k) == _get_dot_path(incoming.body, k)
                 for k in key_tuple
             )
         return _is_subset(recorded.body, incoming.body)
@@ -73,8 +76,8 @@ def match_json_subset(keys: Iterable[str] | None = None) -> RequestMatcher:
 def match_all(*matchers: RequestMatcher) -> RequestMatcher:
     """Logical AND combinator over multiple RequestMatchers."""
 
-    def _matcher(incoming: RecordedRequest, recorded: RecordedRequest) -> bool:
-        return all(m(incoming, recorded) for m in matchers)
+    def _matcher(recorded: RecordedRequest, incoming: RecordedRequest) -> bool:
+        return all(m(recorded, incoming) for m in matchers)
 
     return _matcher
 
@@ -82,22 +85,22 @@ def match_all(*matchers: RequestMatcher) -> RequestMatcher:
 def match_any(*matchers: RequestMatcher) -> RequestMatcher:
     """Logical OR combinator over multiple RequestMatchers."""
 
-    def _matcher(incoming: RecordedRequest, recorded: RecordedRequest) -> bool:
-        return any(m(incoming, recorded) for m in matchers)
+    def _matcher(recorded: RecordedRequest, incoming: RecordedRequest) -> bool:
+        return any(m(recorded, incoming) for m in matchers)
 
     return _matcher
 
 
 def match_json_regex(path: str, pattern: str | re.Pattern[str]) -> RequestMatcher:
-    """Match when dot-path `path` in both incoming and recorded bodies matches `pattern`."""
+    """Match when dot-path `path` in both recorded and incoming bodies matches `pattern`."""
     compiled = pattern if isinstance(pattern, re.Pattern) else re.compile(pattern)
 
-    def _matcher(incoming: RecordedRequest, recorded: RecordedRequest) -> bool:
-        inc_val = _get_dot_path(incoming.body, path)
+    def _matcher(recorded: RecordedRequest, incoming: RecordedRequest) -> bool:
         rec_val = _get_dot_path(recorded.body, path)
-        if inc_val is _MISSING or rec_val is _MISSING:
+        inc_val = _get_dot_path(incoming.body, path)
+        if rec_val is _MISSING or inc_val is _MISSING:
             return False
-        return bool(compiled.search(str(inc_val))) and bool(compiled.search(str(rec_val)))
+        return bool(compiled.search(str(rec_val))) and bool(compiled.search(str(inc_val)))
 
     return _matcher
 
@@ -125,11 +128,11 @@ def match_header_equals(
 
     expected_norm = _norm(value)
 
-    def _matcher(incoming: RecordedRequest, recorded: RecordedRequest) -> bool:
-        inc_val = _norm(_lookup_header(incoming.headers, target_lower))
+    def _matcher(recorded: RecordedRequest, incoming: RecordedRequest) -> bool:
         rec_val = _norm(_lookup_header(recorded.headers, target_lower))
+        inc_val = _norm(_lookup_header(incoming.headers, target_lower))
         if expected_norm is not None:
-            return inc_val == expected_norm and rec_val == expected_norm
-        return inc_val == rec_val
+            return rec_val == expected_norm and inc_val == expected_norm
+        return rec_val == inc_val
 
     return _matcher

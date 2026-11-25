@@ -93,15 +93,15 @@ def test_composable_matchers_unit() -> None:
         },
     )
 
-    assert match_method()(inc, rec)
-    assert match_path()(inc, rec)
-    assert match_json_subset(["model"])(inc, rec)
-    assert not match_json_subset(["model", "temperature"])(inc, rec)
-    assert match_json_regex("messages.0.content", r"Order #\d+")(inc, rec)
-    assert not match_json_regex("messages.0.content", r"Invoice #\d+")(inc, rec)
-    assert match_header_equals("x-tenant")(inc, rec)
-    assert match_header_equals("x-tenant", "ACME")(inc, rec)
-    assert not match_header_equals("x-tenant", "ACME", case_sensitive=True)(inc, rec)
+    assert match_method()(rec, inc)
+    assert match_path()(rec, inc)
+    assert match_json_subset(["model"])(rec, inc)
+    assert not match_json_subset(["model", "temperature"])(rec, inc)
+    assert match_json_regex("messages.0.content", r"Order #\d+")(rec, inc)
+    assert not match_json_regex("messages.0.content", r"Invoice #\d+")(rec, inc)
+    assert match_header_equals("x-tenant")(rec, inc)
+    assert match_header_equals("x-tenant", "ACME")(rec, inc)
+    assert not match_header_equals("x-tenant", "ACME", case_sensitive=True)(rec, inc)
 
     combined = match_all(
         match_method(),
@@ -110,9 +110,39 @@ def test_composable_matchers_unit() -> None:
         match_json_regex("messages.0.content", r"Order #\d+"),
         match_header_equals("x-tenant"),
     )
-    assert combined(inc, rec)
-    assert match_any(match_json_subset(["temperature"]), match_path())(inc, rec)
-    assert not match_any(match_json_subset(["temperature"]))(inc, rec)
+    assert combined(rec, inc)
+    assert match_any(match_json_subset(["temperature"]), match_path())(rec, inc)
+    assert not match_any(match_json_subset(["temperature"]))(rec, inc)
+
+
+def test_match_json_subset_end_to_end_in_tape_session(tmp_path: Path) -> None:
+    cassette_path = tmp_path / "subset_e2e.tape.json"
+    transport = httpx.MockTransport(
+        lambda r: httpx.Response(
+            200,
+            json={
+                "id": "1",
+                "model": "gpt-4o-mini",
+                "choices": [{"message": {"role": "assistant", "content": "subset ok"}}],
+            },
+        )
+    )
+    with tape(cassette_path, mode=TapeMode.RECORD):
+        with httpx.Client(transport=transport) as client:
+            client.post(
+                "https://api.openai.com/v1/chat/completions",
+                json={"model": "gpt-4o-mini"},
+            )
+
+    # Incoming request adds extra fields (trace_id, temperature) not present in recorded subset
+    with tape(cassette_path, mode=TapeMode.REPLAY, custom_matcher=match_json_subset()) as session:
+        with httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500))) as client:
+            resp = client.post(
+                "https://api.openai.com/v1/chat/completions",
+                json={"model": "gpt-4o-mini", "trace_id": "abc-123", "temperature": 0.2},
+            )
+            assert resp.status_code == 200
+            assert session.call_count == 1
 
 
 def test_composable_matchers_with_tape_session(tmp_path: Path) -> None:
