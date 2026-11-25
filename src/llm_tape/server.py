@@ -18,6 +18,7 @@ from llm_tape.scrubbing import (
     decode_body_with_encoding,
     encode_body_with_encoding,
     fingerprint_request,
+    scrub_headers,
     scrub_url,
 )
 
@@ -90,13 +91,20 @@ class TapeReplayServer:
                 self._queues[fp].append(inter)
                 self._loaded_count += 1
 
-    def _match(self, method: str, path: str, body_bytes: bytes) -> Interaction | None:
+    def _match(
+        self,
+        method: str,
+        path: str,
+        body_bytes: bytes,
+        headers: dict[str, str] | None = None,
+    ) -> Interaction | None:
         decoded_body, _ = decode_body_with_encoding(body_bytes)
         synthetic_url = scrub_url(f"http://localhost{path}")
         fp = fingerprint_request(
             method,
             synthetic_url,
             decoded_body,
+            headers=headers,
             ignore_fields=self.ignore_fields,
             match_on=self.match_on,
         )
@@ -141,9 +149,18 @@ class TapeReplayServer:
                     self._send_json(200, server_ref.stats())
                     return
 
-                length = int(self.headers.get("Content-Length", "0") or 0)
+                raw_len = self.headers.get("Content-Length", "0") or "0"
+                try:
+                    length = int(raw_len)
+                except ValueError:
+                    self._send_json(400, {"error": "invalid_content_length"})
+                    return
+                if length < 0:
+                    self._send_json(400, {"error": "invalid_content_length"})
+                    return
                 body_bytes = self.rfile.read(length) if length > 0 else b""
-                inter = server_ref._match(method, self.path, body_bytes)
+                clean_headers = scrub_headers(self.headers.items())
+                inter = server_ref._match(method, self.path, body_bytes, headers=clean_headers)
                 if inter is None:
                     self._send_json(
                         404,
