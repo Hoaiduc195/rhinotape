@@ -164,6 +164,31 @@ class Cassette:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @classmethod
+    def merge(
+        cls,
+        *cassettes: Cassette,
+        output_path: str | Path,
+        deduplicate: bool = False,
+    ) -> Cassette:
+        """Combine multiple cassettes in order into a single Cassette."""
+        merged_interactions: list[Interaction] = []
+        merged_meta: dict[str, Any] = {}
+        seen_fps: set[str] = set()
+        for c in cassettes:
+            merged_meta.update(c.metadata)
+            for inter in c.interactions:
+                if deduplicate:
+                    if inter.request.fingerprint in seen_fps:
+                        continue
+                    seen_fps.add(inter.request.fingerprint)
+                merged_interactions.append(inter)
+        return cls(
+            path=Path(output_path),
+            interactions=merged_interactions,
+            metadata=merged_meta,
+        )
+
+    @classmethod
     def load(cls, path: str | Path) -> Cassette:
         cassette_path = Path(path)
         if not cassette_path.exists():

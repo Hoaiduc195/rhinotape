@@ -1435,6 +1435,34 @@ def _cmd_schema(*, output: Path | None = None) -> int:
     return 0
 
 
+def _cmd_merge(
+    sources: list[Path],
+    *,
+    output: Path,
+    deduplicate: bool = False,
+) -> int:
+    """Merge multiple cassette files or directories into a single output cassette."""
+    files: list[Path] = []
+    for src in sources:
+        if not src.exists():
+            print(f"Error: path not found: {src}", file=sys.stderr)
+            return 1
+        if src.is_file():
+            files.append(src)
+        else:
+            files.extend(iter_cassette_files(src))
+    if not files:
+        print("Error: no cassette files found to merge.", file=sys.stderr)
+        return 1
+    cassettes = [Cassette.load(p) for p in files]
+    merged = Cassette.merge(*cassettes, output_path=output, deduplicate=deduplicate)
+    merged.save()
+    print(
+        f"Merged {len(files)} cassette(s) ({len(merged.interactions)} interaction(s)) -> {output}."
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llm-tape",
@@ -1700,6 +1728,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional file path to write schema JSON (defaults to stdout).",
     )
 
+    p_merge = sub.add_parser(
+        "merge",
+        help="Merge multiple cassettes (or directories) into a single cassette file.",
+    )
+    p_merge.add_argument(
+        "sources",
+        type=Path,
+        nargs="+",
+        help="Source cassette files or directories to merge in order.",
+    )
+    p_merge.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        required=True,
+        help="Destination cassette path (.tape.json or .tape.json.gz).",
+    )
+    p_merge.add_argument(
+        "--deduplicate",
+        action="store_true",
+        help="Drop duplicate interactions sharing the same request fingerprint.",
+    )
+
     return parser
 
 
@@ -1769,6 +1820,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_stats(args.target, as_json=args.as_json)
         if args.command == "schema":
             return _cmd_schema(output=args.output)
+        if args.command == "merge":
+            return _cmd_merge(args.sources, output=args.output, deduplicate=args.deduplicate)
     except (TapeError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
