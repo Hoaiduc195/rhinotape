@@ -103,23 +103,37 @@ def resolve_pii_patterns(redact_pii: bool | str | Iterable[str]) -> tuple[re.Pat
 _GLOB_CHARS = frozenset("*?[")
 
 
-def scrub_headers(
-    headers: Mapping[str, str] | Iterable[tuple[str, str]],
+def compile_sensitive_headers(
     extra_sensitive: Iterable[str] = (),
-) -> dict[str, str]:
-    """Return a copy of headers with sensitive values redacted (supports '*' wildcards)."""
+) -> tuple[frozenset[str], tuple[str, ...]]:
+    """Pre-split extra sensitive header rules into (exact_frozenset, glob_patterns_tuple)."""
+    if not extra_sensitive:
+        return DEFAULT_SENSITIVE_HEADERS, ()
     exact_extra: set[str] = set()
     glob_patterns: list[str] = []
-    if extra_sensitive:
-        for h in extra_sensitive:
-            low = h.lower()
-            if any(ch in low for ch in _GLOB_CHARS):
-                glob_patterns.append(low)
-            else:
-                exact_extra.add(low)
+    for h in extra_sensitive:
+        low = h.lower()
+        if any(ch in low for ch in _GLOB_CHARS):
+            glob_patterns.append(low)
+        else:
+            exact_extra.add(low)
     sensitive = (
         DEFAULT_SENSITIVE_HEADERS | exact_extra if exact_extra else DEFAULT_SENSITIVE_HEADERS
     )
+    return sensitive, tuple(glob_patterns)
+
+
+def scrub_headers(
+    headers: Mapping[str, str] | Iterable[tuple[str, str]],
+    extra_sensitive: Iterable[str] = (),
+    *,
+    compiled: tuple[frozenset[str], tuple[str, ...]] | None = None,
+) -> dict[str, str]:
+    """Return a copy of headers with sensitive values redacted (supports '*' wildcards)."""
+    if compiled is not None:
+        sensitive, glob_patterns = compiled
+    else:
+        sensitive, glob_patterns = compile_sensitive_headers(extra_sensitive)
     items = headers.items() if isinstance(headers, Mapping) else headers
     cleaned: dict[str, str] = {}
     for key, value in items:

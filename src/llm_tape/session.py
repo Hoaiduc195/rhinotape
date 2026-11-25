@@ -42,6 +42,7 @@ from llm_tape.requests_adapter import acquire_requests_patch, release_requests_p
 from llm_tape.scrubbing import (
     DEFAULT_MATCH_ON,
     compile_patterns,
+    compile_sensitive_headers,
     decode_body_with_encoding,
     encode_body_with_encoding,
     find_closest_request,
@@ -461,6 +462,7 @@ class TapeSession:
         self.mode = TapeMode.coerce(mode)
         self.custom_pricing = custom_pricing
         self.extra_sensitive_headers = tuple(extra_sensitive_headers)
+        self._compiled_sensitive_headers = compile_sensitive_headers(self.extra_sensitive_headers)
         self.extra_sensitive_query_params = tuple(extra_sensitive_query_params)
         self.ignore_hosts = tuple(h.lower() for h in ignore_hosts)
         self.ignore_localhost = ignore_localhost
@@ -778,7 +780,7 @@ class TapeSession:
             self.extra_sensitive_query_params,
             redact_url_patterns=self._compiled_url_patterns,
         )
-        clean_headers = scrub_headers(headers, self.extra_sensitive_headers)
+        clean_headers = scrub_headers(headers, compiled=self._compiled_sensitive_headers)
         decoded_body, body_encoding = decode_body_with_encoding(body_bytes)
         if self._has_body_redaction and body_encoding not in {"base64", "empty"}:
             decoded_body = redact_body(
