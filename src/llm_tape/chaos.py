@@ -106,3 +106,21 @@ def corrupt_json_body(
         return replace_response(interaction, body=payload)
 
     return _hook
+
+
+def truncate_stream(max_chunks: int, *, nth: int | None = None) -> ReplayHook:
+    """Return an on_replay hook that truncates SSE stream_chunks to at most `max_chunks`."""
+    if max_chunks < 0:
+        raise ValueError("max_chunks must be >= 0")
+    if nth is not None and nth < 0:
+        raise ValueError("nth must be >= 0")
+
+    def _hook(interaction: Interaction, call_index: int) -> Interaction | None:
+        if nth is not None and call_index != nth:
+            return None
+        chunks = interaction.response.stream_chunks
+        if chunks is None:
+            return None
+        return replace_response(interaction, stream_chunks=chunks[:max_chunks])
+
+    return _hook
