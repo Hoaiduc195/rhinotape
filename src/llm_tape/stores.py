@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from llm_tape.cassette import Cassette
+from llm_tape.cassette import Cassette, iter_cassette_files
 from llm_tape.models import TapeNotFoundError
 
 
@@ -60,3 +60,45 @@ class MemoryCassetteStore:
     def clear(self) -> None:
         with self._lock:
             self._data.clear()
+
+
+class FileCassetteStore:
+    """Filesystem-backed CassetteStore rooted at a directory (with path-traversal guard)."""
+
+    def __init__(self, root_dir: str | Path) -> None:
+        self.root_dir = Path(root_dir).resolve()
+
+    def _resolve_key(self, key: str) -> Path:
+        raw = Path(key)
+        if raw.is_absolute():
+            raise ValueError(f"Cassette store key must be relative, got {key!r}")
+        target = (self.root_dir / raw).resolve()
+        if not target.is_relative_to(self.root_dir):
+            raise ValueError(f"Cassette store key escapes root directory: {key!r}")
+        return target
+
+    def exists(self, key: str) -> bool:
+        return self._resolve_key(key).is_file()
+
+    def load(self, key: str) -> Cassette:
+        return Cassette.load(self._resolve_key(key))
+
+    def save(self, key: str, cassette: Cassette) -> None:
+        target = self._resolve_key(key)
+        cassette.clone(target).save()
+
+    def delete(self, key: str) -> bool:
+        target = self._resolve_key(key)
+        if not target.is_file():
+            return False
+        target.unlink()
+        return True
+
+    def list_keys(self) -> list[str]:
+        if not self.root_dir.is_dir():
+            return []
+        return [
+            p.relative_to(self.root_dir).as_posix()
+            for p in iter_cassette_files(self.root_dir)
+            if p.resolve().is_relative_to(self.root_dir)
+        ]

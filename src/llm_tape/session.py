@@ -53,6 +53,7 @@ from llm_tape.scrubbing import (
     scrub_url,
     validate_match_on,
 )
+from llm_tape.stores import CassetteStore
 from llm_tape.urllib_adapter import acquire_urllib_patch, release_urllib_patch
 
 P = ParamSpec("P")
@@ -438,6 +439,7 @@ class TapeSession:
         on_replay: Callable[[Interaction, int], Interaction | None] | None = None,
         on_record: Callable[[Interaction], Interaction | None] | None = None,
         metadata: dict[str, Any] | None = None,
+        store: CassetteStore | None = None,
         max_interactions: int | None = None,
         max_cost_usd: float | None = None,
         replay_latency_scale: float = 0.0,
@@ -484,6 +486,8 @@ class TapeSession:
         self.on_replay = on_replay
         self.on_record = on_record
         self.metadata: dict[str, Any] = dict(metadata) if metadata else {}
+        self.store = store
+        self._store_key = str(cassette_path)
         self.max_interactions = max_interactions
         self.max_cost_usd = float(max_cost_usd) if max_cost_usd is not None else None
         self.replay_latency_scale = float(replay_latency_scale)
@@ -541,7 +545,7 @@ class TapeSession:
                 return
 
             if self.mode is TapeMode.REPLAY:
-                cassette = Cassette.load(self.cassette_path)
+                cassette = self._load_cassette()
                 self._load_replay_queues(cassette)
                 self._is_replaying = True
                 self._is_recording = False
@@ -549,8 +553,8 @@ class TapeSession:
                 self._is_replaying = False
                 self._is_recording = True
             elif self.mode is TapeMode.ONCE:
-                if self.cassette_path.exists():
-                    cassette = Cassette.load(self.cassette_path)
+                if self._cassette_exists():
+                    cassette = self._load_cassette()
                     self._load_replay_queues(cassette)
                     self._is_replaying = True
                     self._is_recording = False
@@ -558,8 +562,8 @@ class TapeSession:
                     self._is_replaying = False
                     self._is_recording = True
             elif self.mode is TapeMode.NEW_EPISODES:
-                if self.cassette_path.exists():
-                    cassette = Cassette.load(self.cassette_path)
+                if self._cassette_exists():
+                    cassette = self._load_cassette()
                     self._load_replay_queues(cassette)
                     self._existing_interactions = list(cassette.interactions)
                     self._existing_metadata = dict(cassette.metadata)
@@ -571,6 +575,22 @@ class TapeSession:
         except Exception:
             self._active = False
             raise
+
+    def _cassette_exists(self) -> bool:
+        if self.store is not None:
+            return self.store.exists(self._store_key)
+        return self.cassette_path.exists()
+
+    def _load_cassette(self) -> Cassette:
+        if self.store is not None:
+            return self.store.load(self._store_key)
+        return Cassette.load(self.cassette_path)
+
+    def _save_cassette(self, cassette: Cassette) -> None:
+        if self.store is not None:
+            self.store.save(self._store_key, cassette)
+        else:
+            cassette.save()
 
     def _load_replay_queues(self, cassette: Cassette) -> None:
         with self._lock:
@@ -674,10 +694,10 @@ class TapeSession:
                 interactions=combined,
                 metadata=merged_meta,
             )
-            cassette.save()
+            self._save_cassette(cassette)
 
     def save(self, path: str | Path | None = None) -> Path:
-        """Explicitly flush recorded interactions to disk (default: self.cassette_path)."""
+        """Explicitly flush recorded interactions to disk or store (default: self.cassette_path)."""
         target = Path(path) if path is not None else self.cassette_path
         with self._lock:
             recorded_copy = list(self._recorded)
@@ -694,7 +714,10 @@ class TapeSession:
             else {**self.metadata, "llm_tape_version": __version__}
         )
         cassette = Cassette(path=target, interactions=combined, metadata=merged_meta)
-        cassette.save()
+        if path is None and self.store is not None:
+            self.store.save(self._store_key, cassette)
+        else:
+            cassette.save()
         return target
 
     def __enter__(self) -> TapeSession:
@@ -1677,6 +1700,7 @@ def tape(
     on_replay: Callable[[Interaction, int], Interaction | None] | None = None,
     on_record: Callable[[Interaction], Interaction | None] | None = None,
     metadata: dict[str, Any] | None = None,
+    store: CassetteStore | None = None,
     max_interactions: int | None = None,
     max_cost_usd: float | None = None,
     replay_latency_scale: float = 0.0,
@@ -1711,6 +1735,7 @@ def tape(
         on_replay=on_replay,
         on_record=on_record,
         metadata=metadata,
+        store=store,
         max_interactions=max_interactions,
         max_cost_usd=max_cost_usd,
         replay_latency_scale=replay_latency_scale,
