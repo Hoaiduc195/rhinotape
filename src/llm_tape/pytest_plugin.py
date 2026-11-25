@@ -9,6 +9,7 @@ import os
 import re
 import tempfile
 from collections.abc import Generator
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +96,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store_true",
         default=False,
         help="Automatically fail passing replay tests that leave recorded interactions unused.",
+    )
+    group.addoption(
+        "--tape-update-stale",
+        action="store",
+        type=float,
+        default=None,
+        help="Re-record ONCE-mode cassettes older than this many days.",
     )
 
     parser.addini(
@@ -209,6 +217,9 @@ def pytest_configure(config: pytest.Config) -> None:
 
     _resolve_max_cost(config)
     _resolve_max_tokens(config)
+    stale_days = config.getoption("--tape-update-stale", default=None)
+    if stale_days is not None and (not math.isfinite(stale_days) or stale_days < 0.0):
+        raise pytest.UsageError("--tape-update-stale must be a finite number >= 0.")
 
     config.addinivalue_line(
         "markers",
@@ -450,6 +461,29 @@ def _parse_redact_pii_setting(raw: str) -> bool | list[str]:
     return [part.strip() for part in cleaned.split(",") if part.strip()]
 
 
+def _is_cassette_stale(path: Path, max_age_days: float) -> bool:
+    if not path.is_file():
+        return False
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+    recorded_dt: datetime | None = None
+    try:
+        from llm_tape.cassette import Cassette
+
+        cass = Cassette.load(path)
+        if cass.recorded_at:
+            raw = cass.recorded_at.replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(raw)
+            recorded_dt = parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except Exception:
+        recorded_dt = None
+    if recorded_dt is None:
+        try:
+            recorded_dt = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            return False
+    return recorded_dt < cutoff
+
+
 @pytest.fixture
 def llm_tape_dir(request: pytest.FixtureRequest) -> Path:
     """Return the resolved cassette directory Path for the current test module."""
@@ -498,6 +532,14 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
     )
     ext = ".tape.json.gz" if compress else ".tape.json"
     cassette_path = cassette_dir / f"{test_slug}{ext}"
+
+    update_stale = request.config.getoption("--tape-update-stale", default=None)
+    if (
+        update_stale is not None
+        and mode is TapeMode.ONCE
+        and _is_cassette_stale(cassette_path, float(update_stale))
+    ):
+        mode = TapeMode.RECORD
 
     ignore_localhost = (
         bool(marker_kwargs["ignore_localhost"])
