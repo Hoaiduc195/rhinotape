@@ -30,6 +30,7 @@ from llm_tape.models import (
     ToolCall,
 )
 from llm_tape.parsers import parse_llm_interaction, split_sse_chunks
+from llm_tape.pricing import estimate_cache_savings_usd
 from llm_tape.scrubbing import (
     compile_patterns,
     fingerprint_request,
@@ -1369,6 +1370,7 @@ def _cmd_stats(target: Path, *, as_json: bool = False) -> int:
                     "reasoning_tokens": 0,
                     "total_tokens": 0,
                     "estimated_cost_usd": 0.0,
+                    "cache_savings_usd": 0.0,
                     "latencies": [],
                 },
             )
@@ -1379,6 +1381,13 @@ def _cmd_stats(target: Path, *, as_json: bool = False) -> int:
             b["reasoning_tokens"] += inter.llm.usage.reasoning_tokens
             b["total_tokens"] += inter.llm.usage.total_tokens
             b["estimated_cost_usd"] += inter.llm.estimated_cost_usd
+            b["cache_savings_usd"] += estimate_cache_savings_usd(
+                inter.llm.model,
+                inter.llm.usage.input_tokens,
+                inter.llm.usage.output_tokens,
+                cached_input_tokens=inter.llm.usage.cached_input_tokens,
+                cache_creation_tokens=inter.llm.usage.cache_creation_tokens,
+            )
             b["latencies"].append(inter.latency_ms)
             all_latencies.append(inter.latency_ms)
 
@@ -1400,6 +1409,7 @@ def _cmd_stats(target: Path, *, as_json: bool = False) -> int:
                 "reasoning_tokens": b["reasoning_tokens"],
                 "total_tokens": b["total_tokens"],
                 "estimated_cost_usd": round(float(b["estimated_cost_usd"]), 8),
+                "cache_savings_usd": round(float(b["cache_savings_usd"]), 8),
                 "avg_latency_ms": round(sum(lats) / len(lats), 2) if lats else 0.0,
                 "p95_latency_ms": round(_percentile(lats, 95.0), 2),
             }
@@ -1412,6 +1422,7 @@ def _cmd_stats(target: Path, *, as_json: bool = False) -> int:
     total_tokens = sum(int(r["total_tokens"]) for r in rows)
     total_reasoning = sum(int(r["reasoning_tokens"]) for r in rows)
     total_cost = round(sum(float(r["estimated_cost_usd"]) for r in rows), 8)
+    total_cache_savings = round(sum(float(r["cache_savings_usd"]) for r in rows), 8)
     totals = {
         "files": len(files) - len(errors),
         "calls": total_calls,
@@ -1421,6 +1432,7 @@ def _cmd_stats(target: Path, *, as_json: bool = False) -> int:
         "reasoning_tokens": total_reasoning,
         "total_tokens": total_tokens,
         "estimated_cost_usd": total_cost,
+        "cache_savings_usd": total_cache_savings,
         "avg_latency_ms": (
             round(sum(all_latencies) / len(all_latencies), 2) if all_latencies else 0.0
         ),
@@ -1451,6 +1463,8 @@ def _cmd_stats(target: Path, *, as_json: bool = False) -> int:
         f"{totals['cache_hit_pct']:>5.1f}% ${total_cost:>10.6f} "
         f"{totals['avg_latency_ms']:>8.1f} {totals['p95_latency_ms']:>8.1f}"
     )
+    if total_cache_savings:
+        print(f"Estimated cache savings: ${total_cache_savings:.6f}")
     return 1 if errors else 0
 
 

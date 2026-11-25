@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from llm_tape.models import TapeMode
+from llm_tape.pricing import estimate_cache_savings_usd
 from llm_tape.scrubbing import DEFAULT_MATCH_ON
 from llm_tape.session import TapeSession
 
@@ -174,6 +175,7 @@ def _compute_report_totals(entries: list[dict[str, Any]]) -> dict[str, Any]:
         "output_tokens": sum(int(e["output_tokens"]) for e in entries),
         "total_tokens": sum(int(e["total_tokens"]) for e in entries),
         "estimated_cost_usd": round(sum(float(e["estimated_cost_usd"]) for e in entries), 8),
+        "cache_savings_usd": round(sum(float(e.get("cache_savings_usd", 0.0)) for e in entries), 8),
         "latency_ms": round(sum(float(e["latency_ms"]) for e in entries), 2),
     }
 
@@ -342,6 +344,10 @@ def pytest_terminal_summary(
                 f"{totals['total_tokens']:>8} {totals['cached_input_tokens']:>7} "
                 f"${totals['estimated_cost_usd']:>10.6f}"
             )
+            if totals.get("cache_savings_usd"):
+                terminalreporter.write_line(
+                    f"Estimated cache savings: ${totals['cache_savings_usd']:.6f}"
+                )
         else:
             terminalreporter.write_line("No llm_tape sessions executed.")
 
@@ -486,6 +492,16 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
         interactions = session.interactions
         entries = request.config.stash.get(_REPORT_KEY, None)
         if entries is not None:
+            cache_savings = sum(
+                estimate_cache_savings_usd(
+                    i.llm.model,
+                    i.llm.usage.input_tokens,
+                    i.llm.usage.output_tokens,
+                    cached_input_tokens=i.llm.usage.cached_input_tokens,
+                    cache_creation_tokens=i.llm.usage.cache_creation_tokens,
+                )
+                for i in interactions
+            )
             entries.append(
                 {
                     "nodeid": request.node.nodeid,
@@ -497,6 +513,7 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
                     "output_tokens": usage.output_tokens,
                     "total_tokens": usage.total_tokens,
                     "estimated_cost_usd": round(session.total_cost_usd, 8),
+                    "cache_savings_usd": round(cache_savings, 8),
                     "latency_ms": round(sum(i.latency_ms for i in interactions), 2),
                 }
             )
