@@ -6,6 +6,7 @@ Gracefully no-ops if `requests` is not installed (zero hard runtime dependency).
 from __future__ import annotations
 
 import codecs
+import contextvars
 import http
 import importlib
 import threading
@@ -26,6 +27,9 @@ _patch_lock = threading.Lock()
 _patch_refcount = 0
 _orig_session_send: Any = None
 _session_getter: Callable[[], TapeSession | None] | None = None
+_in_requests_send: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "llm_tape_in_requests_send", default=False
+)
 
 
 def _extract_body_bytes(prepared_request: Any) -> bytes:
@@ -109,38 +113,52 @@ class _ReplayRequestsRaw:
 
 
 class _RecordingRequestsRaw:
-    """Wraps a live urllib3 HTTPResponse raw stream, recording UTF-8 chunks on EOF."""
+    """Wraps a live urllib3 raw stream, recording UTF-8 SSE chunks or raw bytes on EOF."""
 
     def __init__(
         self,
         upstream_raw: Any,
-        on_complete: Callable[[list[str]], None],
+        *,
+        is_sse: bool,
+        on_complete_sse: Callable[[list[str]], None] | None = None,
+        on_complete_bytes: Callable[[bytes], None] | None = None,
     ) -> None:
         self._upstream = upstream_raw
-        self._on_complete = on_complete
+        self._is_sse = is_sse
+        self._on_complete_sse = on_complete_sse
+        self._on_complete_bytes = on_complete_bytes
         self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        self._chunks: list[str] = []
+        self._text_chunks: list[str] = []
+        self._byte_chunks: list[bytes] = []
         self._reached_eof = False
         self._committed = False
 
     def _record_bytes(self, data: bytes) -> None:
-        if data:
+        if not data:
+            return
+        if self._is_sse:
             text = self._utf8_decoder.decode(data, final=False)
             if text:
-                self._chunks.append(text)
+                self._text_chunks.append(text)
+        else:
+            self._byte_chunks.append(data)
 
     def _finish(self) -> None:
         if not self._reached_eof:
-            tail = self._utf8_decoder.decode(b"", final=True)
-            if tail:
-                self._chunks.append(tail)
+            if self._is_sse:
+                tail = self._utf8_decoder.decode(b"", final=True)
+                if tail:
+                    self._text_chunks.append(tail)
             self._reached_eof = True
         self._commit()
 
     def _commit(self) -> None:
         if not self._committed:
             self._committed = True
-            self._on_complete(self._chunks)
+            if self._is_sse and self._on_complete_sse is not None:
+                self._on_complete_sse(self._text_chunks)
+            elif not self._is_sse and self._on_complete_bytes is not None:
+                self._on_complete_bytes(b"".join(self._byte_chunks))
 
     def stream(self, amt: int | None = 65536, decode_content: bool = True) -> Iterator[bytes]:
         for chunk in self._upstream.stream(amt=amt, decode_content=decode_content):
@@ -149,6 +167,8 @@ class _RecordingRequestsRaw:
         self._finish()
 
     def read(self, amt: int | None = None, decode_content: bool = True) -> bytes:
+        if amt == 0:
+            return b""
         data: bytes = self._upstream.read(amt, decode_content=decode_content)
         if data:
             self._record_bytes(data)
@@ -241,6 +261,14 @@ def _dispatched_requests_send(req_session: Any, prepared_request: Any, **kwargs:
         orig = _orig_session_send
         getter = _session_getter
 
+    if orig is None:
+        orig = requests_mod.Session.send
+        if orig is _dispatched_requests_send:
+            raise RuntimeError("requests.Session.send original reference is unavailable")
+
+    if _in_requests_send.get():
+        return orig(req_session, prepared_request, **kwargs)
+
     session = getter() if getter is not None else None
     if session is None or session.mode is TapeMode.NONE:
         return orig(req_session, prepared_request, **kwargs)
@@ -283,7 +311,12 @@ def _dispatched_requests_send(req_session: Any, prepared_request: Any, **kwargs:
         )
 
     start = time.perf_counter()
-    response = orig(req_session, prepared_request, **kwargs)
+    reentrancy_token = _in_requests_send.set(True)
+    try:
+        response = orig(req_session, prepared_request, **kwargs)
+    finally:
+        _in_requests_send.reset(reentrancy_token)
+
     content_type = str(response.headers.get("content-type", "")).lower()
     is_sse = any(ct in content_type for ct in _SSE_CONTENT_TYPES)
 
@@ -297,7 +330,7 @@ def _dispatched_requests_send(req_session: Any, prepared_request: Any, **kwargs:
         resp_headers_items = list(response.headers.items())
         resp_status = int(response.status_code)
 
-        def on_complete(chunks: list[str]) -> None:
+        def on_complete_sse(chunks: list[str]) -> None:
             latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
             session._record_interaction_parts(
                 recorded_req=recorded_req,
@@ -308,7 +341,22 @@ def _dispatched_requests_send(req_session: Any, prepared_request: Any, **kwargs:
                 stream_chunks=chunks,
             )
 
-        response.raw = _RecordingRequestsRaw(response.raw, on_complete)
+        def on_complete_bytes(data: bytes) -> None:
+            latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
+            session._record_interaction_parts(
+                recorded_req=recorded_req,
+                status_code=resp_status,
+                response_headers=resp_headers_items,
+                response_bytes=data,
+                latency_ms=latency_ms,
+            )
+
+        response.raw = _RecordingRequestsRaw(
+            response.raw,
+            is_sse=is_sse,
+            on_complete_sse=on_complete_sse,
+            on_complete_bytes=on_complete_bytes,
+        )
         return response
 
     raw_content: bytes = response.content
@@ -360,7 +408,7 @@ def acquire_requests_patch(get_active_session: Callable[[], TapeSession | None])
 
 def release_requests_patch() -> None:
     """Release ref-counted requests.Session.send hook."""
-    global _patch_refcount, _orig_session_send, _session_getter
+    global _patch_refcount
     with _patch_lock:
         if _patch_refcount > 0:
             _patch_refcount -= 1
@@ -370,5 +418,3 @@ def release_requests_patch() -> None:
                     requests_mod.Session.send = _orig_session_send
                 except ImportError:
                     pass
-                _orig_session_send = None
-                _session_getter = None

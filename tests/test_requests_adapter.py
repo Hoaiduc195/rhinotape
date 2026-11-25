@@ -245,3 +245,114 @@ def test_requests_adapter_graceful_when_requests_missing(monkeypatch: pytest.Mon
     monkeypatch.setattr(importlib, "import_module", fake_import_module)
     assert acquire_requests_patch(lambda: None) is False
     release_requests_patch()  # safe no-op
+
+
+def test_requests_rv_review_regressions_redirects_binary_stream_and_read0(tmp_path: Path) -> None:
+    from llm_tape.requests_adapter import _RecordingRequestsRaw
+
+    # P1 #1: Redirect hops must not double-record or break replay
+    def redirect_handler(req: requests.PreparedRequest, stream: bool) -> requests.Response:
+        del stream
+        if str(req.url).endswith("/old"):
+            resp = requests.Response()
+            resp.status_code = 302
+            resp.reason = "Found"
+            resp.url = str(req.url)
+            resp.request = req
+            resp.headers = requests.structures.CaseInsensitiveDict(
+                {"Location": "https://api.openai.com/v1/chat/completions"}
+            )
+            resp.raw = _ReplayRequestsRaw((b"",))
+            resp._content = b""
+            resp._content_consumed = True
+            return resp
+        return _make_json_response(
+            req,
+            {
+                "model": "gpt-4o-mini",
+                "choices": [{"message": {"role": "assistant", "content": "redirected"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+            },
+        )
+
+    redirect_tape = tmp_path / "redirect.tape.json"
+    adapter = _FakeUpstreamAdapter(redirect_handler)
+    with tape(redirect_tape, mode=TapeMode.RECORD) as rec:
+        sess = requests.Session()
+        sess.mount("https://", adapter)
+        r = sess.get("https://api.openai.com/old")
+        assert r.status_code == 200
+        assert r.json()["choices"][0]["message"]["content"] == "redirected"
+        rec.assert_call_count(1)
+
+    with tape(redirect_tape, mode=TapeMode.REPLAY) as rep:
+        sess = requests.Session()
+        sess.mount("https://", adapter)
+        r2 = sess.get("https://api.openai.com/old")
+        assert r2.status_code == 200
+        assert r2.json()["choices"][0]["message"]["content"] == "redirected"
+        rep.assert_call_count(1)
+        rep.assert_no_unused_interactions()
+
+    # P1 #2: stream=True with JSON & binary responses preserves JSON parsing and binary bytes
+    bin_payload = b"\x89PNG\r\n\x1a\n\x00\xff\xfe\xfd"
+
+    def stream_non_sse_handler(req: requests.PreparedRequest, stream: bool) -> requests.Response:
+        resp = requests.Response()
+        resp.status_code = 200
+        resp.reason = "OK"
+        resp.url = str(req.url)
+        resp.request = req
+        if "binary" in str(req.url):
+            resp.headers = requests.structures.CaseInsensitiveDict({"Content-Type": "image/png"})
+            resp.raw = _ReplayRequestsRaw((bin_payload[:5], bin_payload[5:]))
+        else:
+            raw_json = json.dumps(
+                {
+                    "model": "gpt-4o-mini",
+                    "choices": [{"message": {"role": "assistant", "content": "streamed json"}}],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15},
+                }
+            ).encode("utf-8")
+            resp.headers = requests.structures.CaseInsensitiveDict(
+                {"Content-Type": "application/json"}
+            )
+            resp.raw = _ReplayRequestsRaw((raw_json[:20], raw_json[20:]))
+        resp._content = False if stream else b""
+        resp._content_consumed = not stream
+        return resp
+
+    non_sse_tape = tmp_path / "stream_non_sse.tape.json"
+    non_sse_adapter = _FakeUpstreamAdapter(stream_non_sse_handler)
+    with tape(non_sse_tape, mode=TapeMode.RECORD) as rec2:
+        sess = requests.Session()
+        sess.mount("https://", non_sse_adapter)
+        with sess.post("https://api.openai.com/v1/chat/completions", stream=True) as rj:
+            body_json = json.loads(b"".join(rj.iter_content(chunk_size=16)))
+            assert body_json["choices"][0]["message"]["content"] == "streamed json"
+        with sess.get("https://api.openai.com/v1/binary", stream=True) as rb:
+            body_bin = b"".join(rb.iter_content(chunk_size=4))
+            assert body_bin == bin_payload
+        rec2.assert_call_count(2)
+        assert rec2.total_tokens == 15
+        assert rec2.interactions[0].response.body_encoding == "json"
+        assert rec2.interactions[1].response.body_encoding == "base64"
+
+    with tape(non_sse_tape, mode=TapeMode.REPLAY) as rep2:
+        sess = requests.Session()
+        sess.mount("https://", non_sse_adapter)
+        with sess.get("https://api.openai.com/v1/binary", stream=True) as rb2:
+            assert b"".join(rb2.iter_content(chunk_size=4)) == bin_payload
+        assert rep2.interactions[0].response.body_encoding == "base64"
+
+    # P2 #4: read(0) must not trigger premature EOF commit
+    committed: list[bytes] = []
+    rec_raw = _RecordingRequestsRaw(
+        _ReplayRequestsRaw((b"abc",)),
+        is_sse=False,
+        on_complete_bytes=committed.append,
+    )
+    assert rec_raw.read(0) == b""
+    assert committed == []
+    assert rec_raw.read() == b"abc"
+    assert committed == [b"abc"]
