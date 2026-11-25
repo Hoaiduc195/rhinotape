@@ -2,16 +2,16 @@
 
 Lightweight **record, replay, and assertion** library for testing LLM-powered Python apps in `pytest` — zero API cost in CI, automatic secret scrubbing, **true sync & async SSE streaming**, and built-in assertions for **token budgets, USD cost, and tool-calling sequences**.
 
-Works transparently with any SDK built on `httpx` (`openai`, `anthropic`, `google-genai`, or raw `httpx.Client` / `httpx.AsyncClient`) and optionally `requests` (`pip install llm-tape[requests]`) without modifying your application code.
+Works transparently with any SDK built on `httpx` (`openai`, `anthropic`, `google-genai`, or raw `httpx.Client` / `httpx.AsyncClient`), plus optional zero-dependency adapters for `requests` (`pip install "llm-tape[requests]"`) and `aiohttp` (`pip install "llm-tape[aiohttp]"`) without modifying your application code.
 
 ## Features
 
 - **Record & Replay (`once`, `replay`, `record`, `none`):** Record real LLM HTTP & SSE streaming calls once into human-readable `.tape.json` or deterministic gzip-compressed `.tape.json.gz` files (schema v2 with atomic writes and bounded decompression safety), then replay offline deterministically in milliseconds.
 - **True SSE Streaming (Sync & Async):** Incrementally decodes UTF-8 across TCP chunk boundaries, supports `gzip`/`deflate`/`br`/`zstd` streams, only commits completed streams (aborted streams are ignored), and replays chunk-by-chunk via `iter_lines()` / `aiter_text()`.
-- **Concurrency & Nesting Safe:** Uses a `contextvars.ContextVar` + reference-counted `httpx` and optional `requests` dispatchers — safe for nested `with tape(...)` blocks, concurrent `asyncio.gather(...)` tasks, and `pytest-xdist`.
+- **Concurrency & Nesting Safe:** Uses a `contextvars.ContextVar` + reference-counted `httpx`, optional `requests`, and optional `aiohttp` dispatchers — safe for nested `with tape(...)` blocks, multi-threaded workloads, concurrent `asyncio.gather(...)` tasks, and `pytest-xdist`.
 - **Automatic Secret & PII Scrubbing:** Redacts `Authorization`, `x-api-key`, `x-goog-api-key`, `ocp-apim-subscription-key`, `x-amz-security-token`, cookies, URL basic-auth userinfo, `?key=` query parameters, plus body `redact_fields`, pre-compiled `redact_patterns` (regex on JSON & cross-chunk SSE streams), and custom `scrub_body` hooks.
 - **Flexible Filtering, Matching & Latency Replay:** Ignore non-LLM traffic (`ignore_localhost`, `ignore_hosts`, `ignore_request`), ignore volatile JSON fields (`ignore_fields=["metadata.trace_id", "messages.*.id"]`) and query params (`ignore_query_params`), customize `match_on` or `custom_matcher`, simulate timing with `replay_latency_scale`, and get a clean unified diff on `UnmatchedRequestError`.
-- **LLM-Aware Parsing, Reasoning Tokens & Cached Pricing:** Automatically extracts provider, model, token usage (including OpenAI/Anthropic/Gemini/Bedrock cached input tokens and OpenAI/Gemini reasoning tokens), estimated USD cost (including `o3`, `o4-mini`, `gpt-4.1`, `claude-sonnet-4`, `gemini-2.5-*`, overrideable via `custom_pricing` or `LLM_TAPE_PRICING_FILE`), response text, and tool calls for:
+- **LLM-Aware Parsing, Thinking/Reasoning Tokens & Cached Pricing:** Automatically extracts provider, model, token usage (including OpenAI/Anthropic/Gemini/Bedrock cached input tokens and OpenAI/Gemini `reasoning_tokens`), extended `thinking` blocks (Anthropic, DeepSeek-R1, Gemini), estimated USD cost (including `o3`, `o4-mini`, `gpt-4.1`, `claude-4`, `gemini-2.5-*`, `deepseek-*`, `mistral-*`, overrideable via `custom_pricing` or `LLM_TAPE_PRICING_FILE`), response text, and tool calls for:
   - **OpenAI / Azure OpenAI / OpenRouter** (Chat Completions & Responses API, JSON & SSE)
   - **Anthropic** (Messages API, JSON & SSE)
   - **Google Gemini / Vertex AI** (`:generateContent` & `:streamGenerateContent`, JSON & SSE)
@@ -34,8 +34,9 @@ Works transparently with any SDK built on `httpx` (`openai`, `anthropic`, `googl
 
 ```bash
 pip install llm-tape
-# Optional requests adapter:
+# Optional HTTP adapters:
 pip install "llm-tape[requests]"
+pip install "llm-tape[aiohttp]"
 # or with uv:
 uv add --dev llm-tape
 ```
@@ -123,6 +124,13 @@ llm-tape redact tests/tapes --field user.email --pattern "sk-[A-Za-z0-9]+" --dry
 
 # Find (dry-run) or remove (--apply) orphaned or stale cassettes
 llm-tape prune tests/tapes --tests-dir tests/ --older-than-days 30
+
+# Export cassettes to Markdown PR table, CSV cost report, or HAR 1.2 archive
+llm-tape export tests/tapes --format markdown
+llm-tape export tests/tapes --format har -o trace.har
+
+# Bulk convert cassettes between plain .tape.json and gzip .tape.json.gz
+llm-tape convert tests/tapes --to gzip --delete-source
 ```
 
 Run pytest with terminal cost summary & JSON report for CI:
