@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import codecs
 import contextvars
 import fnmatch
 import functools
 import inspect
+import re
 import threading
 import time
 import zlib
@@ -17,6 +19,7 @@ from typing import Any, ParamSpec, TypeVar
 
 import httpx
 
+from llm_tape._version import __version__
 from llm_tape.cassette import Cassette
 from llm_tape.models import (
     Interaction,
@@ -32,12 +35,16 @@ from llm_tape.models import (
 from llm_tape.parsers import parse_llm_interaction
 from llm_tape.pricing import ModelPrice
 from llm_tape.scrubbing import (
+    DEFAULT_MATCH_ON,
     decode_body_with_encoding,
     encode_body_with_encoding,
     fingerprint_request,
     format_request_diff,
+    redact_body,
+    redact_text,
     scrub_headers,
     scrub_url,
+    validate_match_on,
 )
 
 P = ParamSpec("P")
@@ -136,6 +143,14 @@ class _StreamContentDecoder:
                 self._brotli_obj = brotli.Decompressor()
             except ImportError:
                 self._mode = "identity"
+        elif enc == "zstd":
+            try:
+                import zstandard  # type: ignore[import-not-found]
+
+                self._mode = "zstd"
+                self._zstd_obj: Any = zstandard.ZstdDecompressor().decompressobj()
+            except ImportError:
+                self._mode = "identity"
 
     def decompress(self, chunk: bytes) -> bytes:
         if not chunk or self._mode == "identity":
@@ -144,25 +159,35 @@ class _StreamContentDecoder:
             return bytes(self._zlib_obj.decompress(chunk))
         if self._mode == "brotli":
             return bytes(self._brotli_obj.process(chunk))
+        if self._mode == "zstd":
+            return bytes(self._zstd_obj.decompress(chunk))
         return chunk
 
     def flush(self) -> bytes:
         if self._mode == "zlib":
             return bytes(self._zlib_obj.flush())
+        if self._mode == "zstd":
+            return bytes(self._zstd_obj.flush())
         return b""
 
 
 class _ReplayByteStream(httpx.SyncByteStream, httpx.AsyncByteStream):
     """Yields recorded SSE/stream chunks for both sync and async httpx replay."""
 
-    def __init__(self, chunks: tuple[str, ...]) -> None:
+    def __init__(self, chunks: tuple[str, ...], *, chunk_delay_s: float = 0.0) -> None:
         self._chunks = [c.encode("utf-8") for c in chunks]
+        self._chunk_delay_s = max(0.0, chunk_delay_s)
 
     def __iter__(self) -> Iterator[bytes]:
-        yield from self._chunks
+        for chunk in self._chunks:
+            if self._chunk_delay_s > 0.0:
+                time.sleep(self._chunk_delay_s)
+            yield chunk
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         for chunk in self._chunks:
+            if self._chunk_delay_s > 0.0:
+                await asyncio.sleep(self._chunk_delay_s)
             yield chunk
 
 
@@ -290,10 +315,18 @@ class TapeSession:
         ignore_request: Callable[[httpx.Request], bool] | None = None,
         ignore_fields: Iterable[str] = (),
         ignore_query_params: Iterable[str] = (),
+        redact_fields: Iterable[str] = (),
+        redact_patterns: Iterable[str | re.Pattern[str]] = (),
+        scrub_body: Callable[[Any], Any] | None = None,
+        match_on: Iterable[str] = DEFAULT_MATCH_ON,
+        custom_matcher: Callable[[RecordedRequest, RecordedRequest], bool] | None = None,
+        replay_latency_scale: float = 0.0,
         allow_playback_repeats: bool = False,
         save_on_error: bool = False,
         patch_httpx: bool = True,
     ) -> None:
+        if replay_latency_scale < 0.0:
+            raise ValueError("replay_latency_scale must be >= 0.0")
         self.cassette_path = Path(cassette_path)
         self.mode = TapeMode.coerce(mode)
         self.custom_pricing = custom_pricing
@@ -304,6 +337,12 @@ class TapeSession:
         self.ignore_request = ignore_request
         self.ignore_fields = tuple(ignore_fields)
         self.ignore_query_params = tuple(ignore_query_params)
+        self.redact_fields = tuple(redact_fields)
+        self.redact_patterns = tuple(redact_patterns)
+        self.scrub_body = scrub_body
+        self.match_on = validate_match_on(match_on)
+        self.custom_matcher = custom_matcher
+        self.replay_latency_scale = float(replay_latency_scale)
         self.allow_playback_repeats = allow_playback_repeats
         self.save_on_error = save_on_error
         self.patch_httpx = patch_httpx
@@ -312,6 +351,7 @@ class TapeSession:
         self._interactions: list[Interaction] = []
         self._recorded: list[Interaction] = []
         self._replay_queues: dict[str, deque[Interaction]] = defaultdict(deque)
+        self._custom_replay_list: list[Interaction] = []
         self._known_fingerprints: dict[str, int] = {}
         self._all_loaded_requests: list[RecordedRequest] = []
         self._is_replaying = False
@@ -331,6 +371,7 @@ class TapeSession:
                 self._interactions.clear()
                 self._recorded.clear()
                 self._replay_queues.clear()
+                self._custom_replay_list.clear()
                 self._known_fingerprints.clear()
                 self._all_loaded_requests.clear()
 
@@ -367,10 +408,13 @@ class TapeSession:
                     interaction.request.method,
                     interaction.request.url,
                     interaction.request.body,
+                    headers=interaction.request.headers,
                     ignore_fields=self.ignore_fields,
                     ignore_query_params=self.ignore_query_params,
+                    match_on=self.match_on,
                 )
                 self._replay_queues[fp].append(interaction)
+                self._custom_replay_list.append(interaction)
                 self._known_fingerprints[fp] = self._known_fingerprints.get(fp, 0) + 1
                 self._all_loaded_requests.append(interaction.request)
 
@@ -411,7 +455,7 @@ class TapeSession:
             cassette = Cassette(
                 path=self.cassette_path,
                 interactions=recorded_copy,
-                metadata={"llm_tape_version": "0.2.0"},
+                metadata={"llm_tape_version": __version__},
             )
             cassette.save()
 
@@ -455,12 +499,21 @@ class TapeSession:
         clean_url = scrub_url(str(request.url), self.extra_sensitive_query_params)
         clean_headers = scrub_headers(request.headers.items(), self.extra_sensitive_headers)
         decoded_body, body_encoding = decode_body_with_encoding(body_bytes)
+        if body_encoding != "base64":
+            decoded_body = redact_body(
+                decoded_body,
+                redact_fields=self.redact_fields,
+                redact_patterns=self.redact_patterns,
+                scrub_body=self.scrub_body,
+            )
         fp = fingerprint_request(
             request.method,
             clean_url,
             decoded_body,
+            headers=clean_headers,
             ignore_fields=self.ignore_fields,
             ignore_query_params=self.ignore_query_params,
+            match_on=self.match_on,
         )
         return RecordedRequest(
             method=request.method.upper(),
@@ -471,14 +524,29 @@ class TapeSession:
             body_encoding=body_encoding,
         )
 
-    def _replay_response(
-        self,
-        request: httpx.Request,
-        recorded_req: RecordedRequest,
-        *,
-        stream: bool = False,
-    ) -> httpx.Response:
+    def _pop_replay_interaction(self, recorded_req: RecordedRequest) -> Interaction:
         with self._lock:
+            if self.custom_matcher is not None:
+                for idx, candidate in enumerate(self._custom_replay_list):
+                    if self.custom_matcher(candidate.request, recorded_req):
+                        if self.allow_playback_repeats and len(self._custom_replay_list) == 1:
+                            interaction = candidate
+                        else:
+                            interaction = self._custom_replay_list.pop(idx)
+                        self._interactions.append(interaction)
+                        return interaction
+                diff_text = format_request_diff(
+                    recorded_req,
+                    self._all_loaded_requests,
+                    ignore_fields=self.ignore_fields,
+                    ignore_query_params=self.ignore_query_params,
+                )
+                raise UnmatchedRequestError(
+                    f"No recorded interaction matched custom_matcher for "
+                    f"{recorded_req.method} {recorded_req.url} in cassette {self.cassette_path}.\n"
+                    f"Closest recorded request diff:\n{diff_text}"
+                )
+
             queue = self._replay_queues.get(recorded_req.fingerprint)
             if not queue:
                 if recorded_req.fingerprint in self._known_fingerprints:
@@ -505,7 +573,16 @@ class TapeSession:
                 queue[0] if (self.allow_playback_repeats and len(queue) == 1) else queue.popleft()
             )
             self._interactions.append(interaction)
+            return interaction
 
+    def _build_replay_httpx_response(
+        self,
+        request: httpx.Request,
+        interaction: Interaction,
+        *,
+        stream: bool = False,
+        chunk_delay_s: float = 0.0,
+    ) -> httpx.Response:
         replay_headers = {
             k: v
             for k, v in interaction.response.headers.items()
@@ -516,7 +593,9 @@ class TapeSession:
                 return httpx.Response(
                     status_code=interaction.response.status_code,
                     headers=replay_headers,
-                    stream=_ReplayByteStream(interaction.response.stream_chunks),
+                    stream=_ReplayByteStream(
+                        interaction.response.stream_chunks, chunk_delay_s=chunk_delay_s
+                    ),
                     request=request,
                 )
             joined = "".join(interaction.response.stream_chunks).encode("utf-8")
@@ -535,6 +614,52 @@ class TapeSession:
             request=request,
         )
 
+    def _replay_response(
+        self,
+        request: httpx.Request,
+        recorded_req: RecordedRequest,
+        *,
+        stream: bool = False,
+    ) -> httpx.Response:
+        interaction = self._pop_replay_interaction(recorded_req)
+        delay_s = (
+            (interaction.latency_ms * self.replay_latency_scale) / 1000.0
+            if self.replay_latency_scale > 0.0 and interaction.latency_ms > 0.0
+            else 0.0
+        )
+        chunk_delay_s = 0.0
+        if delay_s > 0.0:
+            if stream and interaction.response.stream_chunks:
+                chunk_delay_s = delay_s / len(interaction.response.stream_chunks)
+            else:
+                time.sleep(delay_s)
+        return self._build_replay_httpx_response(
+            request, interaction, stream=stream, chunk_delay_s=chunk_delay_s
+        )
+
+    async def _replay_response_async(
+        self,
+        request: httpx.Request,
+        recorded_req: RecordedRequest,
+        *,
+        stream: bool = False,
+    ) -> httpx.Response:
+        interaction = self._pop_replay_interaction(recorded_req)
+        delay_s = (
+            (interaction.latency_ms * self.replay_latency_scale) / 1000.0
+            if self.replay_latency_scale > 0.0 and interaction.latency_ms > 0.0
+            else 0.0
+        )
+        chunk_delay_s = 0.0
+        if delay_s > 0.0:
+            if stream and interaction.response.stream_chunks:
+                chunk_delay_s = delay_s / len(interaction.response.stream_chunks)
+            else:
+                await asyncio.sleep(delay_s)
+        return self._build_replay_httpx_response(
+            request, interaction, stream=stream, chunk_delay_s=chunk_delay_s
+        )
+
     def _record_interaction(
         self,
         recorded_req: RecordedRequest,
@@ -548,6 +673,8 @@ class TapeSession:
         content_type = response.headers.get("content-type", "")
 
         if stream_chunks is not None:
+            if self.redact_patterns:
+                stream_chunks = [redact_text(c, self.redact_patterns) for c in stream_chunks]
             chunks_tuple = tuple(stream_chunks)
             recorded_resp = RecordedResponse(
                 status_code=response.status_code,
@@ -566,6 +693,13 @@ class TapeSession:
             )
         else:
             decoded_resp_body, resp_encoding = decode_body_with_encoding(response_bytes or b"")
+            if resp_encoding != "base64":
+                decoded_resp_body = redact_body(
+                    decoded_resp_body,
+                    redact_fields=self.redact_fields,
+                    redact_patterns=self.redact_patterns,
+                    scrub_body=self.scrub_body,
+                )
             recorded_resp = RecordedResponse(
                 status_code=response.status_code,
                 headers=clean_resp_headers,
@@ -614,7 +748,11 @@ class TapeSession:
             start = time.perf_counter()
             response = sender(request)
             content_type = response.headers.get("content-type", "").lower()
-            is_sse = "text/event-stream" in content_type
+            is_sse = (
+                "text/event-stream" in content_type
+                or "application/x-ndjson" in content_type
+                or "application/ndjson" in content_type
+            )
             should_wrap_stream = (
                 not response.is_stream_consumed
                 and (is_sse or (stream and response.status_code < 400))
@@ -679,12 +817,16 @@ class TapeSession:
             recorded_req = self._build_recorded_request(request, body_bytes)
 
             if self._is_replaying:
-                return self._replay_response(request, recorded_req, stream=stream)
+                return await self._replay_response_async(request, recorded_req, stream=stream)
 
             start = time.perf_counter()
             response: httpx.Response = await sender(request)
             content_type = response.headers.get("content-type", "").lower()
-            is_sse = "text/event-stream" in content_type
+            is_sse = (
+                "text/event-stream" in content_type
+                or "application/x-ndjson" in content_type
+                or "application/ndjson" in content_type
+            )
             should_wrap_stream = (
                 not response.is_stream_consumed
                 and (is_sse or (stream and response.status_code < 400))
@@ -751,6 +893,9 @@ class TapeSession:
             return Usage(
                 input_tokens=sum(i.llm.usage.input_tokens for i in self._interactions),
                 output_tokens=sum(i.llm.usage.output_tokens for i in self._interactions),
+                cached_input_tokens=sum(
+                    i.llm.usage.cached_input_tokens for i in self._interactions
+                ),
             )
 
     @property
@@ -818,6 +963,61 @@ class TapeSession:
                 f"Tool call sequence mismatch: expected {expected}, got {actual}."
             )
 
+    def assert_tool_args(
+        self,
+        name: str,
+        expected: dict[str, Any],
+        *,
+        exact: bool = False,
+    ) -> None:
+        """Assert at least one call to `name` matches `expected` arguments (subset by default)."""
+        matching_calls = [tc for tc in self.tool_calls if tc.name == name]
+        if not matching_calls:
+            raise TapeAssertionError(
+                f"Expected tool {name!r} to be called with {expected!r}, "
+                f"but it was never called. Observed tools: {self.tool_names}"
+            )
+        for tc in matching_calls:
+            if not isinstance(tc.arguments, dict):
+                continue
+            if exact:
+                if tc.arguments == expected:
+                    return
+            else:
+                if all(k in tc.arguments and tc.arguments[k] == v for k, v in expected.items()):
+                    return
+        observed = [tc.arguments for tc in matching_calls]
+        mode_label = "exact" if exact else "subset"
+        raise TapeAssertionError(
+            f"Tool {name!r} arguments did not match ({mode_label}): "
+            f"expected {expected!r}, observed {observed!r}."
+        )
+
+    def assert_no_unused_interactions(self) -> None:
+        """Assert that all recorded interactions in the cassette were consumed during replay."""
+        if not self._is_replaying:
+            return
+        with self._lock:
+            if self.custom_matcher is not None:
+                remaining = len(self._custom_replay_list)
+            else:
+                remaining = sum(len(q) for q in self._replay_queues.values())
+        if remaining > 0:
+            raise TapeAssertionError(
+                f"Cassette {self.cassette_path} has {remaining} unused recorded interaction(s). "
+                "Re-record with mode='record' if the test no longer makes those calls."
+            )
+
+    def assert_max_latency_ms(self, max_ms: float) -> None:
+        """Assert that no recorded/replayed call exceeded `max_ms` milliseconds."""
+        with self._lock:
+            slow = [i.latency_ms for i in self._interactions if i.latency_ms > max_ms]
+        if slow:
+            raise TapeAssertionError(
+                f"Latency budget exceeded: slowest call took {max(slow):.2f}ms "
+                f"(limit: {max_ms:.2f}ms)."
+            )
+
 
 def tape(
     cassette_path: str | Path,
@@ -831,6 +1031,12 @@ def tape(
     ignore_request: Callable[[httpx.Request], bool] | None = None,
     ignore_fields: Iterable[str] = (),
     ignore_query_params: Iterable[str] = (),
+    redact_fields: Iterable[str] = (),
+    redact_patterns: Iterable[str | re.Pattern[str]] = (),
+    scrub_body: Callable[[Any], Any] | None = None,
+    match_on: Iterable[str] = DEFAULT_MATCH_ON,
+    custom_matcher: Callable[[RecordedRequest, RecordedRequest], bool] | None = None,
+    replay_latency_scale: float = 0.0,
     allow_playback_repeats: bool = False,
     save_on_error: bool = False,
     patch_httpx: bool = True,
@@ -847,6 +1053,12 @@ def tape(
         ignore_request=ignore_request,
         ignore_fields=ignore_fields,
         ignore_query_params=ignore_query_params,
+        redact_fields=redact_fields,
+        redact_patterns=redact_patterns,
+        scrub_body=scrub_body,
+        match_on=match_on,
+        custom_matcher=custom_matcher,
+        replay_latency_scale=replay_latency_scale,
         allow_playback_repeats=allow_playback_repeats,
         save_on_error=save_on_error,
         patch_httpx=patch_httpx,

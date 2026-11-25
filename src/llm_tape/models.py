@@ -72,23 +72,28 @@ class Usage:
 
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_input_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
         }
+        if self.cached_input_tokens:
+            payload["cached_input_tokens"] = self.cached_input_tokens
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Usage:
         return cls(
             input_tokens=int(data.get("input_tokens", 0)),
             output_tokens=int(data.get("output_tokens", 0)),
+            cached_input_tokens=int(data.get("cached_input_tokens", 0)),
         )
 
 

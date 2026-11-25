@@ -8,15 +8,24 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from llm_tape._version import __version__ as _VERSION
 from llm_tape.cassette import Cassette
-from llm_tape.models import CorruptCassetteError, TapeError
-
-try:
-    from importlib.metadata import version as _pkg_version
-
-    _VERSION = _pkg_version("llm-tape")
-except Exception:
-    _VERSION = "0.2.0"
+from llm_tape.models import (
+    CorruptCassetteError,
+    Interaction,
+    LLMCallSummary,
+    RecordedRequest,
+    RecordedResponse,
+    TapeError,
+    ToolCall,
+)
+from llm_tape.scrubbing import (
+    fingerprint_request,
+    redact_body,
+    redact_text,
+    scrub_headers,
+    scrub_url,
+)
 
 
 def _cassette_stats(cassette: Cassette) -> dict[str, Any]:
@@ -81,7 +90,13 @@ def _cmd_inspect(path: Path, *, as_json: bool = False) -> int:
     return 0
 
 
-def _cmd_summary(directory: Path, *, as_json: bool = False) -> int:
+def _cmd_summary(
+    directory: Path,
+    *,
+    as_json: bool = False,
+    max_cost: float | None = None,
+    max_tokens: int | None = None,
+) -> int:
     if not directory.exists():
         print(f"Error: directory not found: {directory}", file=sys.stderr)
         return 1
@@ -116,6 +131,20 @@ def _cmd_summary(directory: Path, *, as_json: bool = False) -> int:
         grand_tokens += int(stats["total_tokens"])
         grand_cost += float(stats["estimated_cost_usd"])
 
+    budget_exceeded = False
+    if max_tokens is not None and grand_tokens > max_tokens:
+        budget_exceeded = True
+        print(
+            f"Budget exceeded: total tokens {grand_tokens} > --max-tokens {max_tokens}",
+            file=sys.stderr,
+        )
+    if max_cost is not None and grand_cost > max_cost:
+        budget_exceeded = True
+        print(
+            f"Budget exceeded: total cost ${grand_cost:.6f} > --max-cost ${max_cost:.6f}",
+            file=sys.stderr,
+        )
+
     if as_json:
         print(
             json.dumps(
@@ -132,7 +161,7 @@ def _cmd_summary(directory: Path, *, as_json: bool = False) -> int:
                 indent=2,
             )
         )
-        return 1 if errors else 0
+        return 1 if (errors or budget_exceeded) else 0
 
     print(f"{'Cassette':<48} {'Calls':>6} {'Tokens':>9} {'Est. Cost':>12}")
     print("-" * 79)
@@ -149,7 +178,7 @@ def _cmd_summary(directory: Path, *, as_json: bool = False) -> int:
         f"{f'TOTAL ({len(rows)} files)':<48} {grand_calls:>6} "
         f"{grand_tokens:>9} ${grand_cost:>11.6f}"
     )
-    return 1 if errors else 0
+    return 1 if (errors or budget_exceeded) else 0
 
 
 def _cmd_verify(directory: Path) -> int:
@@ -216,10 +245,115 @@ def _cmd_diff(path_a: Path, path_b: Path, *, as_json: bool = False) -> int:
     return 0
 
 
+def _cmd_redact(
+    target: Path,
+    *,
+    headers: list[str],
+    query_params: list[str],
+    fields: list[str],
+    patterns: list[str],
+    dry_run: bool = False,
+) -> int:
+    """Re-scrub one .tape.json file or all cassettes under a directory."""
+    if not target.exists():
+        print(f"Error: path not found: {target}", file=sys.stderr)
+        return 1
+
+    files = [target] if target.is_file() else sorted(target.rglob("*.tape.json"))
+    if not files:
+        print(f"No .tape.json cassettes found in {target}")
+        return 0
+
+    updated = 0
+    for file_path in files:
+        cassette = Cassette.load(file_path)
+        new_interactions: list[Interaction] = []
+        changed = False
+        for inter in cassette.interactions:
+            new_url = scrub_url(inter.request.url, extra_sensitive=query_params)
+            new_req_headers = scrub_headers(inter.request.headers, extra_sensitive=headers)
+            new_req_body = (
+                redact_body(inter.request.body, redact_fields=fields, redact_patterns=patterns)
+                if inter.request.body_encoding != "base64"
+                else inter.request.body
+            )
+            new_fp = fingerprint_request(
+                inter.request.method, new_url, new_req_body, headers=new_req_headers
+            )
+            new_req = RecordedRequest(
+                method=inter.request.method,
+                url=new_url,
+                headers=new_req_headers,
+                body=new_req_body,
+                fingerprint=new_fp,
+                body_encoding=inter.request.body_encoding,
+            )
+
+            new_resp_headers = scrub_headers(inter.response.headers, extra_sensitive=headers)
+            new_resp_body = (
+                redact_body(inter.response.body, redact_fields=fields, redact_patterns=patterns)
+                if inter.response.body_encoding != "base64"
+                else inter.response.body
+            )
+            new_chunks = (
+                tuple(redact_text(c, patterns) for c in inter.response.stream_chunks)
+                if (inter.response.stream_chunks is not None and patterns)
+                else inter.response.stream_chunks
+            )
+            new_resp = RecordedResponse(
+                status_code=inter.response.status_code,
+                headers=new_resp_headers,
+                body=new_resp_body,
+                body_encoding=inter.response.body_encoding,
+                stream_chunks=new_chunks,
+            )
+            new_llm_text = redact_text(inter.llm.text, patterns) if patterns else inter.llm.text
+            new_tool_calls = tuple(
+                ToolCall(
+                    name=tc.name,
+                    arguments=redact_body(
+                        tc.arguments, redact_fields=fields, redact_patterns=patterns
+                    ),
+                    call_id=tc.call_id,
+                )
+                for tc in inter.llm.tool_calls
+            )
+            new_llm = LLMCallSummary(
+                provider=inter.llm.provider,
+                model=inter.llm.model,
+                usage=inter.llm.usage,
+                estimated_cost_usd=inter.llm.estimated_cost_usd,
+                tool_calls=new_tool_calls,
+                text=new_llm_text,
+                is_stream=inter.llm.is_stream,
+            )
+            new_inter = Interaction(
+                request=new_req,
+                response=new_resp,
+                latency_ms=inter.latency_ms,
+                llm=new_llm,
+            )
+            if new_inter != inter:
+                changed = True
+            new_interactions.append(new_inter)
+
+        if changed:
+            updated += 1
+            if not dry_run:
+                cassette.interactions = new_interactions
+                cassette.save()
+            action = "WOULD UPDATE" if dry_run else "REDACTED"
+            print(f"{action}: {file_path}")
+
+    suffix = " (dry-run)" if dry_run else ""
+    print(f"Done: {updated}/{len(files)} cassette(s) updated{suffix}.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llm-tape",
-        description="Inspect, verify, and diff llm-tape .tape.json cassettes.",
+        description="Inspect, verify, diff, and redact llm-tape .tape.json cassettes.",
     )
     parser.add_argument(
         "--version",
@@ -243,6 +377,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory to scan (default: current directory).",
     )
     p_summary.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
+    p_summary.add_argument(
+        "--max-cost",
+        type=float,
+        default=None,
+        help="Fail with exit code 1 if total estimated USD cost exceeds this limit.",
+    )
+    p_summary.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="Fail with exit code 1 if total tokens exceed this limit.",
+    )
 
     p_verify = sub.add_parser(
         "verify", help="Validate all .tape.json cassettes in a directory (for CI)."
@@ -260,6 +406,50 @@ def build_parser() -> argparse.ArgumentParser:
     p_diff.add_argument("after", type=Path, help="New .tape.json file.")
     p_diff.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
 
+    p_redact = sub.add_parser(
+        "redact", help="Re-scrub secrets/PII in existing .tape.json cassettes."
+    )
+    p_redact.add_argument(
+        "target",
+        type=Path,
+        nargs="?",
+        default=Path("."),
+        help="Cassette file or directory to redact (default: current directory).",
+    )
+    p_redact.add_argument(
+        "--header",
+        action="append",
+        default=[],
+        dest="headers",
+        help="Extra sensitive header name to redact (repeatable).",
+    )
+    p_redact.add_argument(
+        "--query-param",
+        action="append",
+        default=[],
+        dest="query_params",
+        help="Extra sensitive query parameter name to redact (repeatable).",
+    )
+    p_redact.add_argument(
+        "--field",
+        action="append",
+        default=[],
+        dest="fields",
+        help="JSON dot-path field to redact in request/response bodies (repeatable).",
+    )
+    p_redact.add_argument(
+        "--pattern",
+        action="append",
+        default=[],
+        dest="patterns",
+        help="Regex pattern to redact in bodies and stream chunks (repeatable).",
+    )
+    p_redact.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report cassettes that would change without modifying files.",
+    )
+
     return parser
 
 
@@ -270,11 +460,25 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "inspect":
             return _cmd_inspect(args.path, as_json=args.as_json)
         if args.command == "summary":
-            return _cmd_summary(args.directory, as_json=args.as_json)
+            return _cmd_summary(
+                args.directory,
+                as_json=args.as_json,
+                max_cost=args.max_cost,
+                max_tokens=args.max_tokens,
+            )
         if args.command == "verify":
             return _cmd_verify(args.directory)
         if args.command == "diff":
             return _cmd_diff(args.before, args.after, as_json=args.as_json)
+        if args.command == "redact":
+            return _cmd_redact(
+                args.target,
+                headers=args.headers,
+                query_params=args.query_params,
+                fields=args.fields,
+                patterns=args.patterns,
+                dry_run=args.dry_run,
+            )
     except TapeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

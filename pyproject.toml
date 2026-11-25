@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "llm-tape"
-version = "0.2.0"
+dynamic = ["version"]
 description = "Record, replay, and assert on LLM HTTP & SSE streaming calls (tokens, cost, tool calls) in pytest."
 readme = "README.md"
 license = "MIT"
@@ -51,6 +51,9 @@ llm-tape = "llm_tape.cli:main"
 
 [project.entry-points.pytest11]
 llm_tape = "llm_tape.pytest_plugin"
+
+[tool.hatch.version]
+path = "src/llm_tape/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/llm_tape"]

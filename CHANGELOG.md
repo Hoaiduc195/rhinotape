@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 - 2026-11-25
+
+### Added
+- **Single-source dynamic versioning** via `src/llm_tape/_version.py` (`hatch` dynamic version).
+- **Cached input token pricing & external pricing files:** `Usage.cached_input_tokens`, `ModelPrice.cached_input_per_million`, `load_pricing_file()`, and `LLM_TAPE_PRICING_FILE` env var override.
+- **Body scrubbing & custom redactor:** `redact_fields` (dot-path + `*` wildcards), `redact_patterns` (regex on request/response bodies and SSE stream chunks), and `scrub_body` callback.
+- **Flexible request matching & latency replay:** `match_on` (`method`, `url`, `host`, `path`, `query`, `body`, `headers`), `custom_matcher`, and `replay_latency_scale` (sync & async, including per-chunk stream pacing).
+- **Expanded provider & compression support:** Azure OpenAI deployments, Vertex AI Gemini, OpenRouter model prefixes, Ollama (`/api/chat`, `/api/generate`, NDJSON streaming), AWS Bedrock Converse API, and optional `zstd` stream decompression.
+- **New assertions & Pytest ini defaults:** `assert_no_unused_interactions()`, `assert_tool_args()`, `assert_max_latency_ms()`, plus `pytest.ini` / `pyproject.toml` defaults (`tape_mode`, `tape_dir`, `tape_ignore_localhost`, `tape_ignore_hosts`, `tape_ignore_fields`, `tape_ignore_query_params`).
+- **CLI enhancements:** `llm-tape redact` (re-scrub existing cassettes with `--dry-run`) and CI budget gate flags `llm-tape summary --max-cost` / `--max-tokens`.
+- **Trusted Publishing workflow:** `.github/workflows/publish.yml` for automated TestPyPI & PyPI releases.
+
 ## 0.2.0 - 2026-11-25
 
 ### Added

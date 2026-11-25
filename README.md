@@ -9,19 +9,24 @@ Works transparently with any SDK built on `httpx` (`openai`, `anthropic`, `googl
 - **Record & Replay (`once`, `replay`, `record`, `none`):** Record real LLM HTTP & SSE streaming calls once into human-readable `.tape.json` files (schema v2 with atomic writes), then replay offline deterministically in milliseconds.
 - **True SSE Streaming (Sync & Async):** Incrementally decodes UTF-8 across TCP chunk boundaries, only commits completed streams (aborted streams are ignored), and replays chunk-by-chunk via `iter_lines()` / `aiter_text()`.
 - **Concurrency & Nesting Safe:** Uses a `contextvars.ContextVar` + reference-counted `httpx` dispatcher — safe for nested `with tape(...)` blocks and concurrent `asyncio.gather(...)` tasks.
-- **Automatic Secret Scrubbing:** Redacts `Authorization`, `x-api-key`, `x-goog-api-key`, `ocp-apim-subscription-key`, `x-amz-security-token`, cookies, URL basic-auth userinfo, and `?key=` query parameters before saving.
-- **Flexible Filtering & Actionable Diffs:** Ignore non-LLM traffic (`ignore_localhost`, `ignore_hosts`, `ignore_request`), ignore volatile JSON fields (`ignore_fields=["metadata.trace_id", "messages.*.id"]`) and query params (`ignore_query_params`), and get a clean unified diff on `UnmatchedRequestError`.
-- **LLM-Aware Parsing:** Automatically extracts provider, model, token usage (including Anthropic prompt cache tokens and Gemini thinking tokens), estimated USD cost, response text, and tool calls for:
-  - **OpenAI** (Chat Completions & Responses API, JSON & SSE)
+- **Automatic Secret & PII Scrubbing:** Redacts `Authorization`, `x-api-key`, `x-goog-api-key`, `ocp-apim-subscription-key`, `x-amz-security-token`, cookies, URL basic-auth userinfo, `?key=` query parameters, plus body `redact_fields`, `redact_patterns` (regex on JSON & SSE streams), and custom `scrub_body` hooks.
+- **Flexible Filtering, Matching & Latency Replay:** Ignore non-LLM traffic (`ignore_localhost`, `ignore_hosts`, `ignore_request`), ignore volatile JSON fields (`ignore_fields=["metadata.trace_id", "messages.*.id"]`) and query params (`ignore_query_params`), customize `match_on` or `custom_matcher`, simulate timing with `replay_latency_scale`, and get a clean unified diff on `UnmatchedRequestError`.
+- **LLM-Aware Parsing & Cached Token Pricing:** Automatically extracts provider, model, token usage (including OpenAI/Anthropic/Gemini cached input tokens and Gemini thinking tokens), estimated USD cost (override via `custom_pricing` or `LLM_TAPE_PRICING_FILE`), response text, and tool calls for:
+  - **OpenAI / Azure OpenAI / OpenRouter** (Chat Completions & Responses API, JSON & SSE)
   - **Anthropic** (Messages API, JSON & SSE)
-  - **Google Gemini** (`:generateContent` & `:streamGenerateContent`, JSON & SSE)
+  - **Google Gemini / Vertex AI** (`:generateContent` & `:streamGenerateContent`, JSON & SSE)
+  - **Ollama** (`/api/chat`, `/api/generate`, JSON & NDJSON streaming)
+  - **AWS Bedrock** (Converse API)
 - **Built-in Assertions:**
   - `session.assert_cost_under(0.01)`
   - `session.assert_tokens_under(2000)`
   - `session.assert_tool_called("search_docs", min_times=1)`
+  - `session.assert_tool_args("search_docs", {"query": "pytest"})`
   - `session.assert_tool_sequence(["search_docs", "summarize"])`
   - `session.assert_call_count(2)`
-- **Pytest Plugin + CI-ready CLI:** Auto-discovered `llm_tape` fixture (`--tape-mode`, `--tape-dir`, `@pytest.mark.tape(...)`) and `llm-tape inspect | summary | verify | diff` CLI with `--json` output.
+  - `session.assert_no_unused_interactions()`
+  - `session.assert_max_latency_ms(2000.0)`
+- **Pytest Plugin + CI-ready CLI:** Auto-discovered `llm_tape` fixture (`--tape-mode`, `--tape-dir`, `@pytest.mark.tape(...)`, `pyproject.toml` ini defaults) and `llm-tape inspect | summary | verify | diff | redact` CLI with `--json` and CI budget gates (`--max-cost`, `--max-tokens`).
 
 ## Installation
 

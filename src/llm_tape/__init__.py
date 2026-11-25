@@ -1,5 +1,6 @@
 """llm-tape: Record, replay, and assert on LLM HTTP & SSE calls in pytest."""
 
+from llm_tape._version import __version__
 from llm_tape.cassette import Cassette
 from llm_tape.models import (
     CorruptCassetteError,
@@ -15,7 +16,8 @@ from llm_tape.models import (
     UnmatchedRequestError,
     Usage,
 )
-from llm_tape.pricing import DEFAULT_PRICING, ModelPrice, estimate_cost_usd
+from llm_tape.pricing import DEFAULT_PRICING, ModelPrice, estimate_cost_usd, load_pricing_file
+from llm_tape.scrubbing import DEFAULT_MATCH_ON, VALID_MATCH_ON, redact_body, redact_text
 from llm_tape.session import TapeSession, tape, use_tape
 from llm_tape.transport import AsyncTapeTransport, TapeTransport
 
@@ -23,6 +25,7 @@ __all__ = [
     "AsyncTapeTransport",
     "Cassette",
     "CorruptCassetteError",
+    "DEFAULT_MATCH_ON",
     "DEFAULT_PRICING",
     "Interaction",
     "LLMCallSummary",
@@ -38,9 +41,12 @@ __all__ = [
     "ToolCall",
     "UnmatchedRequestError",
     "Usage",
+    "VALID_MATCH_ON",
+    "__version__",
     "estimate_cost_usd",
+    "load_pricing_file",
+    "redact_body",
+    "redact_text",
     "tape",
     "use_tape",
 ]
-
-__version__ = "0.2.0"

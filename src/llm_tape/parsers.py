@@ -11,6 +11,8 @@ from llm_tape.models import LLMCallSummary, ToolCall, Usage
 from llm_tape.pricing import ModelPrice, estimate_cost_usd
 
 _GEMINI_MODEL_RE = re.compile(r"/models/([^/:?]+)")
+_AZURE_DEPLOYMENT_RE = re.compile(r"/openai/deployments/([^/?]+)")
+_BEDROCK_MODEL_RE = re.compile(r"/model/([^/?]+)/converse")
 
 
 def _parse_json_args(raw: Any) -> dict[str, Any] | str:
@@ -38,11 +40,22 @@ def _detect_provider(
         return "anthropic"
     if (
         "generativelanguage.googleapis.com" in lower_url
+        or "aiplatform.googleapis.com" in lower_url
         or ":generatecontent" in lower_url
         or ":streamgeneratecontent" in lower_url
     ):
         return "gemini"
-    if "openai.com" in lower_url or "/chat/completions" in lower_url or "/responses" in lower_url:
+    if "/converse" in lower_url and ("bedrock" in lower_url or "/model/" in lower_url):
+        return "bedrock"
+    if lower_url.rstrip("/").endswith(("/api/chat", "/api/generate")):
+        return "ollama"
+    if (
+        "openai.com" in lower_url
+        or "openai.azure.com" in lower_url
+        or "openrouter.ai" in lower_url
+        or "/chat/completions" in lower_url
+        or "/responses" in lower_url
+    ):
         return "openai"
 
     if isinstance(response_body, dict):
@@ -50,6 +63,12 @@ def _detect_provider(
             return "anthropic"
         if "candidates" in response_body:
             return "gemini"
+        if isinstance(response_body.get("output"), dict) and "message" in response_body["output"]:
+            return "bedrock"
+        if "prompt_eval_count" in response_body or (
+            "done" in response_body and ("message" in response_body or "response" in response_body)
+        ):
+            return "ollama"
         if "choices" in response_body or "output" in response_body:
             return "openai"
 
@@ -79,7 +98,15 @@ def _extract_openai_text(content: Any) -> list[str]:
     return []
 
 
+def _extract_openai_cached_tokens(usage_data: dict[str, Any]) -> int:
+    details = usage_data.get("prompt_tokens_details") or usage_data.get("input_tokens_details")
+    if isinstance(details, dict):
+        return int(details.get("cached_tokens", 0) or 0)
+    return 0
+
+
 def _parse_openai_json(
+    url: str,
     request_body: Any,
     response_body: dict[str, Any],
     custom_pricing: dict[str, ModelPrice] | None,
@@ -87,12 +114,22 @@ def _parse_openai_json(
     model = response_body.get("model") or (
         request_body.get("model") if isinstance(request_body, dict) else None
     )
+    if not model:
+        azure_match = _AZURE_DEPLOYMENT_RE.search(url)
+        if azure_match:
+            model = azure_match.group(1)
+
     usage_data = response_body.get("usage") or {}
     input_tokens = int(usage_data.get("prompt_tokens", usage_data.get("input_tokens", 0)) or 0)
     output_tokens = int(
         usage_data.get("completion_tokens", usage_data.get("output_tokens", 0)) or 0
     )
-    usage = Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+    cached_tokens = _extract_openai_cached_tokens(usage_data)
+    usage = Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_tokens,
+    )
 
     tool_calls: list[ToolCall] = []
     texts: list[str] = []
@@ -126,7 +163,13 @@ def _parse_openai_json(
         elif item_type == "message":
             texts.extend(_extract_openai_text(item.get("content")))
 
-    cost = estimate_cost_usd(model, usage.input_tokens, usage.output_tokens, custom_pricing)
+    cost = estimate_cost_usd(
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        custom_pricing,
+        cached_input_tokens=usage.cached_input_tokens,
+    )
     return LLMCallSummary(
         provider="openai",
         model=model,
@@ -146,13 +189,18 @@ def _parse_anthropic_json(
         request_body.get("model") if isinstance(request_body, dict) else None
     )
     usage_data = response_body.get("usage") or {}
+    cache_read = int(usage_data.get("cache_read_input_tokens", 0) or 0)
     input_tokens = (
         int(usage_data.get("input_tokens", 0) or 0)
         + int(usage_data.get("cache_creation_input_tokens", 0) or 0)
-        + int(usage_data.get("cache_read_input_tokens", 0) or 0)
+        + cache_read
     )
     output_tokens = int(usage_data.get("output_tokens", 0) or 0)
-    usage = Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+    usage = Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cache_read,
+    )
 
     tool_calls: list[ToolCall] = []
     texts: list[str] = []
@@ -171,7 +219,13 @@ def _parse_anthropic_json(
                 )
             )
 
-    cost = estimate_cost_usd(model, usage.input_tokens, usage.output_tokens, custom_pricing)
+    cost = estimate_cost_usd(
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        custom_pricing,
+        cached_input_tokens=usage.cached_input_tokens,
+    )
     return LLMCallSummary(
         provider="anthropic",
         model=model,
@@ -195,10 +249,15 @@ def _parse_gemini_json(
 
     usage_meta = response_body.get("usageMetadata") or {}
     input_tokens = int(usage_meta.get("promptTokenCount", 0) or 0)
+    cached_tokens = int(usage_meta.get("cachedContentTokenCount", 0) or 0)
     output_tokens = int(usage_meta.get("candidatesTokenCount", 0) or 0) + int(
         usage_meta.get("thoughtsTokenCount", 0) or 0
     )
-    usage = Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+    usage = Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_tokens,
+    )
 
     tool_calls: list[ToolCall] = []
     texts: list[str] = []
@@ -218,9 +277,118 @@ def _parse_gemini_json(
                     )
                 )
 
-    cost = estimate_cost_usd(model, usage.input_tokens, usage.output_tokens, custom_pricing)
+    cost = estimate_cost_usd(
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        custom_pricing,
+        cached_input_tokens=usage.cached_input_tokens,
+    )
     return LLMCallSummary(
         provider="gemini",
+        model=model,
+        usage=usage,
+        estimated_cost_usd=cost,
+        tool_calls=tuple(tool_calls),
+        text="\n".join(texts),
+    )
+
+
+def _parse_ollama_json(
+    request_body: Any,
+    response_body: dict[str, Any],
+    custom_pricing: dict[str, ModelPrice] | None,
+) -> LLMCallSummary:
+    model = response_body.get("model") or (
+        request_body.get("model") if isinstance(request_body, dict) else None
+    )
+    input_tokens = int(response_body.get("prompt_eval_count", 0) or 0)
+    output_tokens = int(response_body.get("eval_count", 0) or 0)
+    usage = Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+
+    texts: list[str] = []
+    tool_calls: list[ToolCall] = []
+    if isinstance(response_body.get("response"), str) and response_body["response"]:
+        texts.append(response_body["response"])
+    msg = response_body.get("message")
+    if isinstance(msg, dict):
+        if isinstance(msg.get("content"), str) and msg["content"]:
+            texts.append(msg["content"])
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                tool_calls.append(
+                    ToolCall(
+                        name=str(fn["name"]),
+                        arguments=_parse_json_args(fn.get("arguments")),
+                        call_id=tc.get("id"),
+                    )
+                )
+
+    cost = estimate_cost_usd(model, usage.input_tokens, usage.output_tokens, custom_pricing)
+    return LLMCallSummary(
+        provider="ollama",
+        model=str(model) if model else None,
+        usage=usage,
+        estimated_cost_usd=cost,
+        tool_calls=tuple(tool_calls),
+        text="\n".join(texts),
+    )
+
+
+def _parse_bedrock_json(
+    url: str,
+    request_body: Any,
+    response_body: dict[str, Any],
+    custom_pricing: dict[str, ModelPrice] | None,
+) -> LLMCallSummary:
+    model: str | None = request_body.get("modelId") if isinstance(request_body, dict) else None
+    if not model:
+        match = _BEDROCK_MODEL_RE.search(url)
+        if match:
+            from urllib.parse import unquote
+
+            model = unquote(match.group(1))
+
+    usage_data = response_body.get("usage") or {}
+    input_tokens = int(usage_data.get("inputTokens", 0) or 0)
+    output_tokens = int(usage_data.get("outputTokens", 0) or 0)
+    cached_tokens = int(usage_data.get("cacheReadInputTokens", 0) or 0)
+    usage = Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_tokens,
+    )
+
+    texts: list[str] = []
+    tool_calls: list[ToolCall] = []
+    output_obj = response_body.get("output")
+    msg = output_obj.get("message") if isinstance(output_obj, dict) else None
+    if isinstance(msg, dict):
+        for block in msg.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if isinstance(block.get("text"), str):
+                texts.append(block["text"])
+            tu = block.get("toolUse")
+            if isinstance(tu, dict) and tu.get("name"):
+                tool_calls.append(
+                    ToolCall(
+                        name=str(tu["name"]),
+                        arguments=_parse_json_args(tu.get("input")),
+                        call_id=tu.get("toolUseId"),
+                    )
+                )
+
+    cost = estimate_cost_usd(
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        custom_pricing,
+        cached_input_tokens=usage.cached_input_tokens,
+    )
+    return LLMCallSummary(
+        provider="bedrock",
         model=model,
         usage=usage,
         estimated_cost_usd=cost,
@@ -274,13 +442,19 @@ def parse_sse_events(raw_sse: str) -> list[tuple[str | None, Any]]:
 
 
 def _parse_openai_sse(
+    url: str,
     request_body: Any,
     events: Sequence[tuple[str | None, Any]],
     custom_pricing: dict[str, ModelPrice] | None,
 ) -> LLMCallSummary:
     model: str | None = request_body.get("model") if isinstance(request_body, dict) else None
+    if not model:
+        azure_match = _AZURE_DEPLOYMENT_RE.search(url)
+        if azure_match:
+            model = azure_match.group(1)
     input_tokens = 0
     output_tokens = 0
+    cached_tokens = 0
     text_parts: list[str] = []
     # index -> {"id": str|None, "name": str, "args": list[str]}
     tool_acc: dict[int, dict[str, Any]] = {}
@@ -308,7 +482,7 @@ def _parse_openai_sse(
             )
             continue
         if ptype == "response.completed" and isinstance(payload.get("response"), dict):
-            summary = _parse_openai_json(request_body, payload["response"], custom_pricing)
+            summary = _parse_openai_json(url, request_body, payload["response"], custom_pricing)
             return LLMCallSummary(
                 provider="openai",
                 model=summary.model or model,
@@ -329,6 +503,9 @@ def _parse_openai_sse(
                 usage_data.get("completion_tokens", usage_data.get("output_tokens", output_tokens))
                 or 0
             )
+            c_toks = _extract_openai_cached_tokens(usage_data)
+            if c_toks:
+                cached_tokens = c_toks
 
         for choice in payload.get("choices") or []:
             delta = choice.get("delta") or {}
@@ -354,8 +531,18 @@ def _parse_openai_sse(
         for _, slot in sorted(tool_acc.items())
         if slot["name"]
     ) or tuple(responses_calls)
-    usage = Usage(input_tokens=input_tokens, output_tokens=output_tokens)
-    cost = estimate_cost_usd(model, usage.input_tokens, usage.output_tokens, custom_pricing)
+    usage = Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_tokens,
+    )
+    cost = estimate_cost_usd(
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        custom_pricing,
+        cached_input_tokens=usage.cached_input_tokens,
+    )
     return LLMCallSummary(
         provider="openai",
         model=model,
@@ -375,6 +562,7 @@ def _parse_anthropic_sse(
     model: str | None = request_body.get("model") if isinstance(request_body, dict) else None
     input_tokens = 0
     output_tokens = 0
+    cached_tokens = 0
     text_parts: list[str] = []
     tool_acc: dict[int, dict[str, Any]] = {}
 
@@ -388,10 +576,11 @@ def _parse_anthropic_sse(
             if msg.get("model"):
                 model = str(msg["model"])
             u = msg.get("usage") or {}
+            cached_tokens = int(u.get("cache_read_input_tokens", 0) or 0)
             input_tokens = (
                 int(u.get("input_tokens", 0) or 0)
                 + int(u.get("cache_creation_input_tokens", 0) or 0)
-                + int(u.get("cache_read_input_tokens", 0) or 0)
+                + cached_tokens
             )
             output_tokens = int(u.get("output_tokens", output_tokens) or 0)
         elif etype == "content_block_start":
@@ -426,8 +615,18 @@ def _parse_anthropic_sse(
         for _, slot in sorted(tool_acc.items())
         if slot["name"]
     )
-    usage = Usage(input_tokens=input_tokens, output_tokens=output_tokens)
-    cost = estimate_cost_usd(model, usage.input_tokens, usage.output_tokens, custom_pricing)
+    usage = Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_tokens,
+    )
+    cost = estimate_cost_usd(
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        custom_pricing,
+        cached_input_tokens=usage.cached_input_tokens,
+    )
     return LLMCallSummary(
         provider="anthropic",
         model=model,
@@ -451,6 +650,7 @@ def _parse_gemini_sse(
 
     input_tokens = 0
     output_tokens = 0
+    cached_tokens = 0
     text_parts: list[str] = []
     tool_calls: list[ToolCall] = []
 
@@ -465,6 +665,8 @@ def _parse_gemini_sse(
             output_tokens = int(um.get("candidatesTokenCount", 0) or 0) + int(
                 um.get("thoughtsTokenCount", 0) or 0
             )
+            if "cachedContentTokenCount" in um:
+                cached_tokens = int(um.get("cachedContentTokenCount", 0) or 0)
         for cand in payload.get("candidates") or []:
             content = cand.get("content") or {}
             for part in content.get("parts") or []:
@@ -481,10 +683,77 @@ def _parse_gemini_sse(
                         )
                     )
 
+    usage = Usage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_tokens,
+    )
+    cost = estimate_cost_usd(
+        model,
+        usage.input_tokens,
+        usage.output_tokens,
+        custom_pricing,
+        cached_input_tokens=usage.cached_input_tokens,
+    )
+    return LLMCallSummary(
+        provider="gemini",
+        model=model,
+        usage=usage,
+        estimated_cost_usd=cost,
+        tool_calls=tuple(tool_calls),
+        text="".join(text_parts),
+        is_stream=True,
+    )
+
+
+def _parse_ollama_ndjson(
+    request_body: Any,
+    raw_stream: str,
+    custom_pricing: dict[str, ModelPrice] | None,
+) -> LLMCallSummary:
+    model: str | None = request_body.get("model") if isinstance(request_body, dict) else None
+    input_tokens = 0
+    output_tokens = 0
+    text_parts: list[str] = []
+    tool_calls: list[ToolCall] = []
+
+    for line in raw_stream.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("model"):
+            model = str(payload["model"])
+        if "prompt_eval_count" in payload:
+            input_tokens = int(payload.get("prompt_eval_count", 0) or 0)
+        if "eval_count" in payload:
+            output_tokens = int(payload.get("eval_count", 0) or 0)
+        if isinstance(payload.get("response"), str) and payload["response"]:
+            text_parts.append(payload["response"])
+        msg = payload.get("message")
+        if isinstance(msg, dict):
+            if isinstance(msg.get("content"), str) and msg["content"]:
+                text_parts.append(msg["content"])
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    tool_calls.append(
+                        ToolCall(
+                            name=str(fn["name"]),
+                            arguments=_parse_json_args(fn.get("arguments")),
+                            call_id=tc.get("id"),
+                        )
+                    )
+
     usage = Usage(input_tokens=input_tokens, output_tokens=output_tokens)
     cost = estimate_cost_usd(model, usage.input_tokens, usage.output_tokens, custom_pricing)
     return LLMCallSummary(
-        provider="gemini",
+        provider="ollama",
         model=model,
         usage=usage,
         estimated_cost_usd=cost,
@@ -503,14 +772,21 @@ def parse_llm_interaction(
     stream_chunks: Sequence[str] | None = None,
     content_type: str = "",
 ) -> LLMCallSummary:
-    """Extract normalized LLM metadata from a JSON or SSE streaming HTTP interaction."""
-    is_sse = stream_chunks is not None or "text/event-stream" in content_type.lower()
-    if is_sse:
-        raw_sse = "".join(stream_chunks) if stream_chunks is not None else str(response_body or "")
-        events = parse_sse_events(raw_sse)
+    """Extract normalized LLM metadata from a JSON, SSE, or NDJSON streaming HTTP interaction."""
+    lower_ct = content_type.lower()
+    is_ndjson = "application/x-ndjson" in lower_ct or "application/ndjson" in lower_ct
+    is_stream = stream_chunks is not None or "text/event-stream" in lower_ct or is_ndjson
+    if is_stream:
+        raw_stream = (
+            "".join(stream_chunks) if stream_chunks is not None else str(response_body or "")
+        )
+        if _detect_provider(url, None) == "ollama" or is_ndjson:
+            if _detect_provider(url, None) == "ollama":
+                return _parse_ollama_ndjson(request_body, raw_stream, custom_pricing)
+        events = parse_sse_events(raw_stream)
         provider = _detect_provider(url, None, events)
         if provider == "openai":
-            return _parse_openai_sse(request_body, events, custom_pricing)
+            return _parse_openai_sse(url, request_body, events, custom_pricing)
         if provider == "anthropic":
             return _parse_anthropic_sse(request_body, events, custom_pricing)
         if provider == "gemini":
@@ -522,9 +798,13 @@ def parse_llm_interaction(
 
     provider = _detect_provider(url, response_body)
     if provider == "openai":
-        return _parse_openai_json(request_body, response_body, custom_pricing)
+        return _parse_openai_json(url, request_body, response_body, custom_pricing)
     if provider == "anthropic":
         return _parse_anthropic_json(request_body, response_body, custom_pricing)
     if provider == "gemini":
         return _parse_gemini_json(url, response_body, custom_pricing)
+    if provider == "ollama":
+        return _parse_ollama_json(request_body, response_body, custom_pricing)
+    if provider == "bedrock":
+        return _parse_bedrock_json(url, request_body, response_body, custom_pricing)
     return LLMCallSummary(provider="unknown")

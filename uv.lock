@@ -580,7 +580,6 @@ wheels = [
 
 [[package]]
 name = "llm-tape"
-version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -608,7 +607,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0" },
 ]
-provides-extras = ["pytest", "dev"]
+provides-extras = ["dev", "pytest"]
 
 [[package]]
 name = "mypy"
