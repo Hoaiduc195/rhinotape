@@ -30,7 +30,13 @@ from llm_tape.models import (
     ToolCall,
 )
 from llm_tape.parsers import parse_llm_interaction, split_sse_chunks
-from llm_tape.pricing import estimate_cache_savings_usd
+from llm_tape.pricing import (
+    DEFAULT_PRICING,
+    PRICING_FILE_ENV,
+    ModelPrice,
+    estimate_cache_savings_usd,
+    load_pricing_file,
+)
 from llm_tape.scrubbing import (
     compile_patterns,
     fingerprint_request,
@@ -1468,6 +1474,62 @@ def _cmd_stats(target: Path, *, as_json: bool = False) -> int:
     return 1 if errors else 0
 
 
+def _cmd_pricing(*, prefix: str | None = None, as_json: bool = False) -> int:
+    """Display effective built-in (+ LLM_TAPE_PRICING_FILE) model pricing table."""
+    table: dict[str, ModelPrice] = dict(DEFAULT_PRICING)
+    env_file = os.environ.get(PRICING_FILE_ENV)
+    if env_file and Path(env_file).is_file():
+        try:
+            table.update(load_pricing_file(env_file))
+        except (OSError, ValueError) as exc:
+            print(f"Warning: failed to load {PRICING_FILE_ENV}: {exc}", file=sys.stderr)
+
+    needle = prefix.lower().strip() if prefix else ""
+    items = [
+        (name, price)
+        for name, price in sorted(table.items())
+        if not needle or needle in name.lower()
+    ]
+    if as_json:
+        payload = {
+            name: {
+                "input_per_million": price.input_per_million,
+                "output_per_million": price.output_per_million,
+                "cached_input_per_million": price.cached_input_per_million,
+                "cache_write_per_million": price.cache_write_per_million,
+            }
+            for name, price in items
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    if not items:
+        print(f"No models matching {prefix!r}.")
+        return 0
+
+    print(
+        f"{'Model':<28} {'Input / 1M':>11} {'Output / 1M':>12} "
+        f"{'Cached / 1M':>12} {'Write / 1M':>11}"
+    )
+    print("-" * 78)
+    for name, price in items:
+        cached_s = (
+            f"${price.cached_input_per_million:>10.4f}"
+            if price.cached_input_per_million is not None
+            else f"{'-':>11}"
+        )
+        write_s = (
+            f"${price.cache_write_per_million:>9.4f}"
+            if price.cache_write_per_million is not None
+            else f"{'-':>10}"
+        )
+        print(
+            f"{name:<28} ${price.input_per_million:>10.4f} "
+            f"${price.output_per_million:>11.4f} {cached_s:>12} {write_s:>11}"
+        )
+    return 0
+
+
 def _cmd_schema(*, output: Path | None = None) -> int:
     """Output the Draft 2020-12 JSON Schema for .tape.json cassettes."""
     rendered = json.dumps(cassette_json_schema(), indent=2, ensure_ascii=False) + "\n"
@@ -1917,6 +1979,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scale factor for replaying recorded latencies (default: 0.0).",
     )
 
+    p_pricing = sub.add_parser(
+        "pricing",
+        help="Display built-in (and LLM_TAPE_PRICING_FILE) USD per 1M token pricing table.",
+    )
+    p_pricing.add_argument(
+        "--filter",
+        dest="prefix",
+        default=None,
+        help="Filter models by substring (case-insensitive).",
+    )
+    p_pricing.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
+
     return parser
 
 
@@ -1999,6 +2073,8 @@ def main(argv: list[str] | None = None) -> int:
                 allow_repeats=not args.no_repeats,
                 latency_scale=args.latency_scale,
             )
+        if args.command == "pricing":
+            return _cmd_pricing(prefix=args.prefix, as_json=args.as_json)
     except (TapeError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
