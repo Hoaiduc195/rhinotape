@@ -1165,6 +1165,21 @@ class TapeSession:
         return [tc.name for tc in self.tool_calls]
 
     @property
+    def all_texts(self) -> list[str]:
+        with self._lock:
+            return [i.llm.text for i in self._interactions if i.llm.text]
+
+    @property
+    def last_text(self) -> str:
+        with self._lock:
+            return self._interactions[-1].llm.text if self._interactions else ""
+
+    @property
+    def last_thinking(self) -> str:
+        with self._lock:
+            return self._interactions[-1].llm.thinking if self._interactions else ""
+
+    @property
     def is_replaying(self) -> bool:
         return self._is_replaying
 
@@ -1234,6 +1249,47 @@ class TapeSession:
         if failed:
             raise TapeAssertionError(
                 f"Expected all HTTP calls to succeed (< 400), but got error(s): {failed}."
+            )
+
+    def assert_text_contains(self, substring: str, *, case_sensitive: bool = True) -> None:
+        texts = self.all_texts
+        needle = substring if case_sensitive else substring.lower()
+        found = any((needle in t) if case_sensitive else (needle in t.lower()) for t in texts)
+        if not found:
+            raise TapeAssertionError(
+                f"Expected LLM response text to contain {substring!r}, "
+                f"but observed texts: {texts!r}."
+            )
+
+    def assert_text_matches(self, pattern: str | re.Pattern[str]) -> None:
+        regex = pattern if isinstance(pattern, re.Pattern) else re.compile(pattern)
+        texts = self.all_texts
+        if not any(regex.search(t) for t in texts):
+            raise TapeAssertionError(
+                f"Expected LLM response text to match pattern {regex.pattern!r}, "
+                f"but observed texts: {texts!r}."
+            )
+
+    def assert_no_tool_called(self, name: str) -> None:
+        calls = self.tool_calls
+        count = sum(1 for tc in calls if tc.name == name)
+        if count > 0:
+            raise TapeAssertionError(
+                f"Expected tool {name!r} NOT to be called, but it was called {count} time(s)."
+            )
+
+    def assert_thinking_present(self) -> None:
+        if not any(i.llm.thinking for i in self.interactions):
+            raise TapeAssertionError(
+                "Expected at least one LLM call to include non-empty thinking output, "
+                "but none was observed."
+            )
+
+    def assert_reasoning_tokens_under(self, max_tokens: int) -> None:
+        actual = self.total_usage.reasoning_tokens
+        if actual > max_tokens:
+            raise TapeAssertionError(
+                f"Reasoning token budget exceeded: used {actual} tokens (limit: {max_tokens})."
             )
 
     def assert_tool_called(self, name: str, *, min_times: int = 1) -> None:
