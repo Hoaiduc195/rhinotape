@@ -436,6 +436,7 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
         redact_fields=marker_kwargs.get("redact_fields", ()),
         redact_patterns=marker_kwargs.get("redact_patterns", ()),
         redact_pii=marker_kwargs.get("redact_pii", False),
+        redact_url_patterns=marker_kwargs.get("redact_url_patterns", ()),
         scrub_body=marker_kwargs.get("scrub_body"),
         match_on=marker_kwargs.get("match_on") or DEFAULT_MATCH_ON,
         match_headers=marker_kwargs.get("match_headers", ()),

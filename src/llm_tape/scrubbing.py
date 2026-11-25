@@ -134,11 +134,13 @@ def scrub_url(
     url: str,
     extra_sensitive: Iterable[str] = (),
     ignore_query_params: Iterable[str] = (),
+    redact_url_patterns: Iterable[str | re.Pattern[str]] = (),
 ) -> str:
-    """Return URL with basic-auth userinfo and sensitive query params redacted and sorted."""
+    """Return URL with basic-auth userinfo, sensitive query params, and path patterns redacted."""
     parts = urlsplit(url)
     has_userinfo = "@" in parts.netloc
-    if not parts.query and not has_userinfo:
+    compiled_path = compile_patterns(redact_url_patterns) if redact_url_patterns else ()
+    if not parts.query and not has_userinfo and not compiled_path:
         return url
 
     extra_set = {p.lower() for p in extra_sensitive} if extra_sensitive else None
@@ -152,6 +154,11 @@ def scrub_url(
         _, hostport = netloc.rsplit("@", 1)
         netloc = f"{URL_USERINFO_REDACTED}@{hostport}"
 
+    path = parts.path
+    if compiled_path and path:
+        for pat in compiled_path:
+            path = pat.sub(URL_USERINFO_REDACTED, path)
+
     new_query = ""
     if parts.query:
         pairs = parse_qsl(parts.query, keep_blank_values=True)
@@ -162,7 +169,7 @@ def scrub_url(
         ]
         new_query = urlencode(cleaned_pairs)
 
-    return urlunsplit((parts.scheme, netloc, parts.path, new_query, parts.fragment))
+    return urlunsplit((parts.scheme, netloc, path, new_query, parts.fragment))
 
 
 def decode_body_with_encoding(raw_bytes: bytes) -> tuple[Any, str]:

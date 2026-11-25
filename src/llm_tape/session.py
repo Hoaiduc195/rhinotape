@@ -428,6 +428,7 @@ class TapeSession:
         redact_fields: Iterable[str] = (),
         redact_patterns: Iterable[str | re.Pattern[str]] = (),
         redact_pii: bool | str | Iterable[str] = False,
+        redact_url_patterns: Iterable[str | re.Pattern[str]] = (),
         scrub_body: Callable[[Any], Any] | None = None,
         match_on: Iterable[str] = DEFAULT_MATCH_ON,
         match_headers: Iterable[str] = (),
@@ -456,6 +457,8 @@ class TapeSession:
         self.redact_fields = tuple(redact_fields)
         self.redact_patterns = tuple(redact_patterns)
         self.redact_pii = redact_pii
+        self.redact_url_patterns = tuple(redact_url_patterns)
+        self._compiled_url_patterns = compile_patterns(self.redact_url_patterns)
         self._compiled_redact_patterns = (
             *compile_patterns(self.redact_patterns),
             *resolve_pii_patterns(redact_pii),
@@ -709,7 +712,11 @@ class TapeSession:
         headers: Iterable[tuple[str, str]],
         body_bytes: bytes,
     ) -> RecordedRequest:
-        clean_url = scrub_url(url, self.extra_sensitive_query_params)
+        clean_url = scrub_url(
+            url,
+            self.extra_sensitive_query_params,
+            redact_url_patterns=self._compiled_url_patterns,
+        )
         clean_headers = scrub_headers(headers, self.extra_sensitive_headers)
         decoded_body, body_encoding = decode_body_with_encoding(body_bytes)
         if self._has_body_redaction and body_encoding not in {"base64", "empty"}:
@@ -1447,6 +1454,7 @@ def tape(
     redact_fields: Iterable[str] = (),
     redact_patterns: Iterable[str | re.Pattern[str]] = (),
     redact_pii: bool | str | Iterable[str] = False,
+    redact_url_patterns: Iterable[str | re.Pattern[str]] = (),
     scrub_body: Callable[[Any], Any] | None = None,
     match_on: Iterable[str] = DEFAULT_MATCH_ON,
     match_headers: Iterable[str] = (),
@@ -1475,6 +1483,7 @@ def tape(
         redact_fields=redact_fields,
         redact_patterns=redact_patterns,
         redact_pii=redact_pii,
+        redact_url_patterns=redact_url_patterns,
         scrub_body=scrub_body,
         match_on=match_on,
         match_headers=match_headers,
