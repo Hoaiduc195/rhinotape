@@ -104,3 +104,61 @@ def test_cli_stats_provider_model_breakdown(
     assert "claude-sonnet-4" in out
     assert "gpt-4o-mini" in out
     assert "TOTAL" in out
+
+
+def test_cli_inspect_verbose_bodies_thinking_and_index(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    p = tmp_path / "detail.tape.json"
+    i1 = Interaction(
+        request=RecordedRequest(
+            "POST", "https://api.openai.com/v1/chat/completions", {}, {"q": 1}, "fp1"
+        ),
+        response=RecordedResponse(200, {"content-type": "application/json"}, {"ans": "first"}),
+        latency_ms=42.0,
+        llm=LLMCallSummary(
+            provider="openai",
+            model="o3",
+            usage=Usage(input_tokens=10, output_tokens=5, reasoning_tokens=3),
+            text="first answer",
+            thinking="first thought",
+        ),
+    )
+    i2 = _inter(
+        "anthropic", "claude-sonnet-4", inp=20, cached=0, out=10, cost=0.001, latency_ms=55.0
+    )
+    Cassette(path=p, interactions=[i1, i2]).save()
+
+    # Human output with --show-bodies --show-thinking --interaction 1
+    assert main(["inspect", str(p), "--show-bodies", "--show-thinking", "--interaction", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "Hash     :" in out
+    assert "first thought" in out
+    assert "first answer" in out
+    assert '{"q": 1}' in out
+    assert "claude-sonnet-4" not in out
+
+    # JSON output with flags
+    assert (
+        main(
+            [
+                "inspect",
+                str(p),
+                "--json",
+                "--show-bodies",
+                "--show-thinking",
+                "--interaction",
+                "1",
+            ]
+        )
+        == 0
+    )
+    j = json.loads(capsys.readouterr().out)
+    assert len(j["content_hash"]) == 64
+    assert len(j["interactions"]) == 1
+    assert j["interactions"][0]["thinking"] == "first thought"
+    assert j["interactions"][0]["request_body"] == {"q": 1}
+
+    # Out-of-range index returns 1
+    assert main(["inspect", str(p), "--interaction", "9"]) == 1
+    assert "out of range" in capsys.readouterr().err

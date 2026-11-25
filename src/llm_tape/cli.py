@@ -84,40 +84,73 @@ def _cassette_stats(cassette: Cassette) -> dict[str, Any]:
     }
 
 
-def _cmd_inspect(path: Path, *, as_json: bool = False) -> int:
+def _cmd_inspect(
+    path: Path,
+    *,
+    as_json: bool = False,
+    show_bodies: bool = False,
+    show_thinking: bool = False,
+    interaction_index: int | None = None,
+) -> int:
     cassette = Cassette.load(path)
     stats = _cassette_stats(cassette)
+    content_hash = cassette.content_hash()
+
+    indexed = list(enumerate(cassette.interactions, start=1))
+    if interaction_index is not None:
+        if interaction_index < 1 or interaction_index > len(indexed):
+            print(
+                f"Error: --interaction {interaction_index} out of range "
+                f"(cassette has {len(indexed)} interaction(s)).",
+                file=sys.stderr,
+            )
+            return 1
+        indexed = [indexed[interaction_index - 1]]
+
     if as_json:
+        items: list[dict[str, Any]] = []
+        for idx, inter in indexed:
+            row: dict[str, Any] = {
+                "index": idx,
+                "method": inter.request.method,
+                "url": inter.request.url,
+                "status_code": inter.response.status_code,
+                "latency_ms": inter.latency_ms,
+                "provider": inter.llm.provider,
+                "model": inter.llm.model,
+                "is_stream": inter.llm.is_stream,
+                "tokens": inter.llm.usage.total_tokens,
+                "cached_input_tokens": inter.llm.usage.cached_input_tokens,
+                "reasoning_tokens": inter.llm.usage.reasoning_tokens,
+                "estimated_cost_usd": inter.llm.estimated_cost_usd,
+                "tools": [tc.name for tc in inter.llm.tool_calls],
+            }
+            if show_thinking:
+                row["text"] = inter.llm.text
+                row["thinking"] = inter.llm.thinking
+            if show_bodies:
+                row["request_body"] = inter.request.body
+                row["response_body"] = inter.response.body
+                row["tool_calls"] = [tc.to_dict() for tc in inter.llm.tool_calls]
+            items.append(row)
         payload = {
             **stats,
-            "interactions": [
-                {
-                    "method": inter.request.method,
-                    "url": inter.request.url,
-                    "status_code": inter.response.status_code,
-                    "latency_ms": inter.latency_ms,
-                    "provider": inter.llm.provider,
-                    "model": inter.llm.model,
-                    "is_stream": inter.llm.is_stream,
-                    "tokens": inter.llm.usage.total_tokens,
-                    "estimated_cost_usd": inter.llm.estimated_cost_usd,
-                    "tools": [tc.name for tc in inter.llm.tool_calls],
-                }
-                for inter in cassette.interactions
-            ],
+            "content_hash": content_hash,
+            "interactions": items,
         }
         print(json.dumps(payload, indent=2))
         return 0
 
     print(f"Cassette : {cassette.path}")
     print(f"Recorded : {cassette.recorded_at or 'unknown'}")
+    print(f"Hash     : {content_hash[:12]}")
     print(f"Calls    : {stats['calls']}")
     print(f"Tokens   : {stats['total_tokens']}")
     print(f"Est. Cost: ${stats['estimated_cost_usd']:.6f}")
 
-    if cassette.interactions:
+    if indexed:
         print("\nInteractions:")
-        for idx, inter in enumerate(cassette.interactions, start=1):
+        for idx, inter in indexed:
             tools = ", ".join(tc.name for tc in inter.llm.tool_calls) or "-"
             model = inter.llm.model or "-"
             stream_tag = " [SSE]" if inter.llm.is_stream else ""
@@ -128,6 +161,28 @@ def _cmd_inspect(path: Path, *, as_json: bool = False) -> int:
                 f"tokens={inter.llm.usage.total_tokens} "
                 f"cost=${inter.llm.estimated_cost_usd:.6f} tools=[{tools}]"
             )
+            if show_thinking:
+                if inter.llm.thinking:
+                    print(f"      thinking: {inter.llm.thinking}")
+                if inter.llm.text:
+                    print(f"      text    : {inter.llm.text}")
+            if show_bodies:
+                req_str = (
+                    json.dumps(inter.request.body, ensure_ascii=False)
+                    if isinstance(inter.request.body, (dict, list))
+                    else str(inter.request.body)
+                )
+                resp_str = (
+                    f"<stream: {len(inter.response.stream_chunks)} chunk(s)>"
+                    if inter.response.stream_chunks is not None
+                    else (
+                        json.dumps(inter.response.body, ensure_ascii=False)
+                        if isinstance(inter.response.body, (dict, list))
+                        else str(inter.response.body)
+                    )
+                )
+                print(f"      request : {req_str}")
+                print(f"      response: {resp_str}")
     return 0
 
 
@@ -1381,9 +1436,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_inspect = sub.add_parser("inspect", help="Inspect a single .tape.json cassette.")
-    p_inspect.add_argument("path", type=Path, help="Path to the .tape.json file.")
+    p_inspect = sub.add_parser("inspect", help="Inspect a single .tape.json(.gz) cassette.")
+    p_inspect.add_argument("path", type=Path, help="Path to the cassette file.")
     p_inspect.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
+    p_inspect.add_argument(
+        "--show-bodies",
+        action="store_true",
+        help="Include request and response bodies in inspect output.",
+    )
+    p_inspect.add_argument(
+        "--show-thinking",
+        action="store_true",
+        help="Include parsed LLM thinking and response text in inspect output.",
+    )
+    p_inspect.add_argument(
+        "--interaction",
+        type=int,
+        default=None,
+        dest="interaction_index",
+        help="Inspect only the given 1-based interaction index.",
+    )
 
     p_summary = sub.add_parser(
         "summary", help="Summarize all .tape.json cassettes under a directory."
@@ -1613,7 +1685,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "inspect":
-            return _cmd_inspect(args.path, as_json=args.as_json)
+            return _cmd_inspect(
+                args.path,
+                as_json=args.as_json,
+                show_bodies=args.show_bodies,
+                show_thinking=args.show_thinking,
+                interaction_index=args.interaction_index,
+            )
         if args.command == "summary":
             return _cmd_summary(
                 args.directory,
