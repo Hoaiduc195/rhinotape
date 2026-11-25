@@ -232,6 +232,11 @@ class Cassette:
             metadata=dict(self.metadata),
         )
 
+    def add_interaction(self, interaction: Interaction) -> Cassette:
+        """Append an Interaction to this cassette in place and return self."""
+        self.interactions.append(interaction)
+        return self
+
     def stats(self) -> dict[str, Any]:
         """Return summary statistics (calls, token breakdown, cost, latency, tools)."""
         return {

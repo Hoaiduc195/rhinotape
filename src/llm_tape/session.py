@@ -668,6 +668,27 @@ class TapeSession:
             )
             cassette.save()
 
+    def save(self, path: str | Path | None = None) -> Path:
+        """Explicitly flush recorded interactions to disk (default: self.cassette_path)."""
+        target = Path(path) if path is not None else self.cassette_path
+        with self._lock:
+            recorded_copy = list(self._recorded)
+            existing_copy = list(self._existing_interactions)
+            existing_meta_copy = dict(self._existing_metadata)
+        combined = (
+            [*existing_copy, *recorded_copy]
+            if self.mode is TapeMode.NEW_EPISODES
+            else (recorded_copy if self._is_recording else list(self.interactions))
+        )
+        merged_meta = (
+            {**existing_meta_copy, **self.metadata, "llm_tape_version": __version__}
+            if self.mode is TapeMode.NEW_EPISODES
+            else {**self.metadata, "llm_tape_version": __version__}
+        )
+        cassette = Cassette(path=target, interactions=combined, metadata=merged_meta)
+        cassette.save()
+        return target
+
     def __enter__(self) -> TapeSession:
         self._prepare()
         try:
