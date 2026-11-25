@@ -29,7 +29,7 @@ from llm_tape.models import (
     TapeError,
     ToolCall,
 )
-from llm_tape.parsers import parse_llm_interaction
+from llm_tape.parsers import parse_llm_interaction, split_sse_chunks
 from llm_tape.scrubbing import (
     fingerprint_request,
     redact_body,
@@ -902,12 +902,7 @@ def _cmd_redact(
                 joined_per_chunk = "".join(per_chunk)
                 joined_redacted = redact_text("".join(inter.response.stream_chunks), patterns)
                 if joined_redacted != joined_per_chunk:
-                    parts = joined_redacted.split("\n\n")
-                    new_chunks: tuple[str, ...] | None = tuple(
-                        f"{p}\n\n" if i < len(parts) - 1 else p
-                        for i, p in enumerate(parts)
-                        if p or i < len(parts) - 1
-                    )
+                    new_chunks: tuple[str, ...] | None = tuple(split_sse_chunks(joined_redacted))
                 else:
                     new_chunks = tuple(per_chunk)
             else:

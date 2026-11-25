@@ -454,43 +454,71 @@ def _parse_bedrock_json(
 
 
 _SSE_LINE_SPLIT_RE = re.compile(r"\r\n|\n|\r")
+_SSE_EVENT_BOUNDARY_RE = re.compile(r"(\r\n\r\n|\n\n)")
+
+
+def split_sse_chunks(text: str) -> list[str]:
+    """Split raw SSE text into event-delimited chunks, preserving LF or CRLF separators."""
+    if not text:
+        return []
+    tokens = _SSE_EVENT_BOUNDARY_RE.split(text)
+    chunks: list[str] = []
+    idx = 0
+    while idx < len(tokens):
+        body = tokens[idx]
+        sep = tokens[idx + 1] if idx + 1 < len(tokens) else ""
+        piece = body + sep
+        if piece:
+            chunks.append(piece)
+        idx += 2
+    return chunks
+
+
+def _strip_one_leading_space(value: str) -> str:
+    return value[1:] if value.startswith(" ") else value
 
 
 def parse_sse_events(raw_sse: str) -> list[tuple[str | None, Any]]:
     """Parse SSE text into a list of (event_name, parsed_json_or_str) tuples per WHATWG SSE spec."""
+    if raw_sse.startswith("\ufeff"):
+        raw_sse = raw_sse[1:]
+
     events: list[tuple[str | None, Any]] = []
     current_event: str | None = None
     data_lines: list[str] = []
 
+    def _dispatch() -> None:
+        nonlocal current_event, data_lines
+        if data_lines:
+            raw_data = "\n".join(data_lines)
+            if raw_data.strip() != "[DONE]":
+                try:
+                    parsed: Any = json.loads(raw_data)
+                except json.JSONDecodeError:
+                    parsed = raw_data
+                events.append((current_event, parsed))
+            data_lines = []
+        current_event = None
+
     for line in _SSE_LINE_SPLIT_RE.split(raw_sse):
         if line == "":
-            if data_lines:
-                raw_data = "\n".join(data_lines)
-                if raw_data.strip() != "[DONE]":
-                    try:
-                        parsed: Any = json.loads(raw_data)
-                    except json.JSONDecodeError:
-                        parsed = raw_data
-                    events.append((current_event, parsed))
-                data_lines = []
-            current_event = None
+            _dispatch()
             continue
         if line.startswith(":"):
             continue
-        if line.startswith("event:"):
-            current_event = line[len("event:") :].strip()
-        elif line.startswith("data:"):
-            data_lines.append(line[len("data:") :].lstrip(" "))
+        if ":" in line:
+            field_name, raw_val = line.split(":", 1)
+            value = _strip_one_leading_space(raw_val)
+        else:
+            field_name = line
+            value = ""
 
-    if data_lines:
-        raw_data = "\n".join(data_lines)
-        if raw_data.strip() != "[DONE]":
-            try:
-                parsed = json.loads(raw_data)
-            except json.JSONDecodeError:
-                parsed = raw_data
-            events.append((current_event, parsed))
+        if field_name == "event":
+            current_event = value or None
+        elif field_name == "data":
+            data_lines.append(value)
 
+    _dispatch()
     return events
 
 

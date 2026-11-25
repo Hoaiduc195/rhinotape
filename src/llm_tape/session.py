@@ -35,7 +35,7 @@ from llm_tape.models import (
     UnmatchedRequestError,
     Usage,
 )
-from llm_tape.parsers import parse_llm_interaction
+from llm_tape.parsers import parse_llm_interaction, split_sse_chunks
 from llm_tape.pricing import ModelPrice
 from llm_tape.requests_adapter import acquire_requests_patch, release_requests_patch
 from llm_tape.scrubbing import (
@@ -898,12 +898,7 @@ class TapeSession:
                 )
                 if joined_redacted != joined_per_chunk:
                     # Secret spanned across TCP chunk boundary: re-split on SSE event boundaries
-                    parts = joined_redacted.split("\n\n")
-                    stream_chunks = [
-                        f"{p}\n\n" if i < len(parts) - 1 else p
-                        for i, p in enumerate(parts)
-                        if p or i < len(parts) - 1
-                    ]
+                    stream_chunks = split_sse_chunks(joined_redacted)
                 else:
                     stream_chunks = per_chunk
             chunks_tuple = tuple(stream_chunks)
