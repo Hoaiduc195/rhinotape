@@ -438,6 +438,7 @@ class TapeSession:
         on_replay: Callable[[Interaction, int], Interaction | None] | None = None,
         on_record: Callable[[Interaction], Interaction | None] | None = None,
         metadata: dict[str, Any] | None = None,
+        max_interactions: int | None = None,
         replay_latency_scale: float = 0.0,
         allow_playback_repeats: bool = False,
         save_on_error: bool = False,
@@ -448,6 +449,8 @@ class TapeSession:
     ) -> None:
         if not math.isfinite(replay_latency_scale) or replay_latency_scale < 0.0:
             raise ValueError("replay_latency_scale must be a finite number >= 0.0")
+        if max_interactions is not None and max_interactions < 0:
+            raise ValueError("max_interactions must be >= 0")
         self.cassette_path = Path(cassette_path)
         self.mode = TapeMode.coerce(mode)
         self.custom_pricing = custom_pricing
@@ -478,6 +481,7 @@ class TapeSession:
         self.on_replay = on_replay
         self.on_record = on_record
         self.metadata: dict[str, Any] = dict(metadata) if metadata else {}
+        self.max_interactions = max_interactions
         self.replay_latency_scale = float(replay_latency_scale)
         self.allow_playback_repeats = allow_playback_repeats
         self.save_on_error = save_on_error
@@ -860,14 +864,27 @@ class TapeSession:
             self._interactions.append(interaction)
         return interaction
 
+    def _check_recording_guardrails(self) -> None:
+        if self.max_interactions is not None:
+            with self._lock:
+                recorded_count = len(self._recorded)
+            if recorded_count >= self.max_interactions:
+                raise TapeAssertionError(
+                    f"Live recording guardrail tripped: reached max_interactions="
+                    f"{self.max_interactions}."
+                )
+
     def _match_replay_or_none(self, recorded_req: RecordedRequest) -> Interaction | None:
         """Return matched replay Interaction, None if recording/new_episodes miss, or raise."""
         if not self._is_replaying:
+            if self._is_recording:
+                self._check_recording_guardrails()
             return None
         if self._is_recording:
             try:
                 return self._pop_replay_interaction(recorded_req)
             except UnmatchedRequestError:
+                self._check_recording_guardrails()
                 return None
         return self._pop_replay_interaction(recorded_req)
 
@@ -1637,6 +1654,7 @@ def tape(
     on_replay: Callable[[Interaction, int], Interaction | None] | None = None,
     on_record: Callable[[Interaction], Interaction | None] | None = None,
     metadata: dict[str, Any] | None = None,
+    max_interactions: int | None = None,
     replay_latency_scale: float = 0.0,
     allow_playback_repeats: bool = False,
     save_on_error: bool = False,
@@ -1669,6 +1687,7 @@ def tape(
         on_replay=on_replay,
         on_record=on_record,
         metadata=metadata,
+        max_interactions=max_interactions,
         replay_latency_scale=replay_latency_scale,
         allow_playback_repeats=allow_playback_repeats,
         save_on_error=save_on_error,
