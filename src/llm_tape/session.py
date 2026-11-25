@@ -1495,6 +1495,34 @@ class TapeSession:
             raise TapeAssertionError(f"JSON output failed predicate check: {parsed!r}")
         return parsed
 
+    def assert_max_cost_per_call(self, max_usd: float) -> None:
+        """Assert that no individual LLM call exceeded `max_usd`."""
+        over = [
+            (idx, i.llm.estimated_cost_usd)
+            for idx, i in enumerate(self.interactions)
+            if round(i.llm.estimated_cost_usd, 8) > max_usd
+        ]
+        if over:
+            worst_idx, worst_cost = max(over, key=lambda x: x[1])
+            raise TapeAssertionError(
+                f"Per-call cost budget exceeded: call[{worst_idx}] cost ${worst_cost:.6f} "
+                f"(limit: ${max_usd:.6f})."
+            )
+
+    def assert_max_tokens_per_call(self, max_tokens: int) -> None:
+        """Assert that no individual LLM call exceeded `max_tokens` total tokens."""
+        over = [
+            (idx, i.llm.usage.total_tokens)
+            for idx, i in enumerate(self.interactions)
+            if i.llm.usage.total_tokens > max_tokens
+        ]
+        if over:
+            worst_idx, worst_tok = max(over, key=lambda x: x[1])
+            raise TapeAssertionError(
+                f"Per-call token budget exceeded: call[{worst_idx}] used {worst_tok} tokens "
+                f"(limit: {max_tokens})."
+            )
+
 
 def tape(
     cassette_path: str | Path,
