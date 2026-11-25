@@ -74,6 +74,7 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cached_input_tokens: int = 0
+    cache_creation_tokens: int = 0
     reasoning_tokens: int = 0
 
     @property
@@ -88,6 +89,8 @@ class Usage:
         }
         if self.cached_input_tokens:
             payload["cached_input_tokens"] = self.cached_input_tokens
+        if self.cache_creation_tokens:
+            payload["cache_creation_tokens"] = self.cache_creation_tokens
         if self.reasoning_tokens:
             payload["reasoning_tokens"] = self.reasoning_tokens
         return payload
@@ -98,6 +101,7 @@ class Usage:
             input_tokens=int(data.get("input_tokens", 0)),
             output_tokens=int(data.get("output_tokens", 0)),
             cached_input_tokens=int(data.get("cached_input_tokens", 0)),
+            cache_creation_tokens=int(data.get("cache_creation_tokens", 0)),
             reasoning_tokens=int(data.get("reasoning_tokens", 0)),
         )
 

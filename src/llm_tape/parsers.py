@@ -250,16 +250,14 @@ def _parse_anthropic_json(
     )
     usage_data = response_body.get("usage") or {}
     cache_read = int(usage_data.get("cache_read_input_tokens", 0) or 0)
-    input_tokens = (
-        int(usage_data.get("input_tokens", 0) or 0)
-        + int(usage_data.get("cache_creation_input_tokens", 0) or 0)
-        + cache_read
-    )
+    cache_write = int(usage_data.get("cache_creation_input_tokens", 0) or 0)
+    input_tokens = int(usage_data.get("input_tokens", 0) or 0) + cache_write + cache_read
     output_tokens = int(usage_data.get("output_tokens", 0) or 0)
     usage = Usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cached_input_tokens=cache_read,
+        cache_creation_tokens=cache_write,
     )
 
     tool_calls: list[ToolCall] = []
@@ -288,6 +286,7 @@ def _parse_anthropic_json(
         usage.output_tokens,
         custom_pricing,
         cached_input_tokens=usage.cached_input_tokens,
+        cache_creation_tokens=usage.cache_creation_tokens,
     )
     return LLMCallSummary(
         provider="anthropic",
@@ -428,6 +427,7 @@ def _parse_bedrock_json(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cached_input_tokens=cache_read,
+        cache_creation_tokens=cache_write,
     )
 
     texts: list[str] = []
@@ -456,6 +456,7 @@ def _parse_bedrock_json(
         usage.output_tokens,
         custom_pricing,
         cached_input_tokens=usage.cached_input_tokens,
+        cache_creation_tokens=usage.cache_creation_tokens,
     )
     return LLMCallSummary(
         provider="bedrock",
@@ -671,6 +672,7 @@ def _parse_anthropic_sse(
     input_tokens = 0
     output_tokens = 0
     cached_tokens = 0
+    cache_write_tokens = 0
     reasoning_tokens = 0
     text_parts: list[str] = []
     thinking_parts: list[str] = []
@@ -687,11 +689,8 @@ def _parse_anthropic_sse(
                 model = str(msg["model"])
             u = msg.get("usage") or {}
             cached_tokens = int(u.get("cache_read_input_tokens", 0) or 0)
-            input_tokens = (
-                int(u.get("input_tokens", 0) or 0)
-                + int(u.get("cache_creation_input_tokens", 0) or 0)
-                + cached_tokens
-            )
+            cache_write_tokens = int(u.get("cache_creation_input_tokens", 0) or 0)
+            input_tokens = int(u.get("input_tokens", 0) or 0) + cache_write_tokens + cached_tokens
             output_tokens = int(u.get("output_tokens", output_tokens) or 0)
         elif etype == "content_block_start":
             idx = int(payload.get("index", 0))
@@ -731,6 +730,7 @@ def _parse_anthropic_sse(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cached_input_tokens=cached_tokens,
+        cache_creation_tokens=cache_write_tokens,
         reasoning_tokens=reasoning_tokens,
     )
     cost = estimate_cost_usd(
@@ -739,6 +739,7 @@ def _parse_anthropic_sse(
         usage.output_tokens,
         custom_pricing,
         cached_input_tokens=usage.cached_input_tokens,
+        cache_creation_tokens=usage.cache_creation_tokens,
     )
     return LLMCallSummary(
         provider="anthropic",

@@ -1197,6 +1197,9 @@ class TapeSession:
                 cached_input_tokens=sum(
                     i.llm.usage.cached_input_tokens for i in self._interactions
                 ),
+                cache_creation_tokens=sum(
+                    i.llm.usage.cache_creation_tokens for i in self._interactions
+                ),
                 reasoning_tokens=sum(i.llm.usage.reasoning_tokens for i in self._interactions),
             )
 
