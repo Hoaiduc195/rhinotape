@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import copy
 import difflib
+import fnmatch
 import hashlib
 import json
 import re
@@ -96,17 +97,33 @@ def resolve_pii_patterns(redact_pii: bool | str | Iterable[str]) -> tuple[re.Pat
     return tuple(resolved)
 
 
+_GLOB_CHARS = frozenset("*?[")
+
+
 def scrub_headers(
     headers: Mapping[str, str] | Iterable[tuple[str, str]],
     extra_sensitive: Iterable[str] = (),
 ) -> dict[str, str]:
-    """Return a copy of headers with sensitive values redacted."""
-    extra_set = {h.lower() for h in extra_sensitive} if extra_sensitive else None
-    sensitive = DEFAULT_SENSITIVE_HEADERS | extra_set if extra_set else DEFAULT_SENSITIVE_HEADERS
+    """Return a copy of headers with sensitive values redacted (supports '*' wildcards)."""
+    exact_extra: set[str] = set()
+    glob_patterns: list[str] = []
+    if extra_sensitive:
+        for h in extra_sensitive:
+            low = h.lower()
+            if any(ch in low for ch in _GLOB_CHARS):
+                glob_patterns.append(low)
+            else:
+                exact_extra.add(low)
+    sensitive = (
+        DEFAULT_SENSITIVE_HEADERS | exact_extra if exact_extra else DEFAULT_SENSITIVE_HEADERS
+    )
     items = headers.items() if isinstance(headers, Mapping) else headers
     cleaned: dict[str, str] = {}
     for key, value in items:
-        if key.lower() in sensitive:
+        low_key = key.lower()
+        if low_key in sensitive or (
+            glob_patterns and any(fnmatch.fnmatchcase(low_key, pat) for pat in glob_patterns)
+        ):
             cleaned[key] = REDACTED
         else:
             cleaned[key] = value
