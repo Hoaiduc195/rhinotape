@@ -176,10 +176,9 @@ def _resolve_max_cost(config: pytest.Config) -> float | None:
     if cli_val is not None:
         val = float(cli_val)
     else:
-        raw = (
-            os.environ.get("LLM_TAPE_MAX_COST", "").strip()
-            or str(config.getini("tape_max_cost") or "").strip()
-        )
+        getini = getattr(config, "getini", None)
+        ini_val = str(getini("tape_max_cost") or "") if callable(getini) else ""
+        raw = os.environ.get("LLM_TAPE_MAX_COST", "").strip() or ini_val.strip()
         if not raw:
             return None
         try:
@@ -196,10 +195,9 @@ def _resolve_max_tokens(config: pytest.Config) -> int | None:
     if cli_val is not None:
         val = int(cli_val)
     else:
-        raw = (
-            os.environ.get("LLM_TAPE_MAX_TOKENS", "").strip()
-            or str(config.getini("tape_max_tokens") or "").strip()
-        )
+        getini = getattr(config, "getini", None)
+        ini_val = str(getini("tape_max_tokens") or "") if callable(getini) else ""
+        raw = os.environ.get("LLM_TAPE_MAX_TOKENS", "").strip() or ini_val.strip()
         if not raw:
             return None
         try:
