@@ -109,6 +109,15 @@ class TapeReplayServer:
             self._served_count += 1
             return inter
 
+    def stats(self) -> dict[str, int]:
+        """Return live server replay counters."""
+        with self._lock:
+            return {
+                "loaded_interactions": self._loaded_count,
+                "served_requests": self._served_count,
+                "unmatched_requests": self._unmatched_count,
+            }
+
     def _make_handler_cls(self) -> type[http.server.BaseHTTPRequestHandler]:
         server_ref = self
 
@@ -116,19 +125,30 @@ class TapeReplayServer:
             def log_message(self, format: str, *args: Any) -> None:
                 del format, args
 
+            def _send_json(self, status_code: int, payload: dict[str, Any]) -> None:
+                data = json.dumps(payload).encode("utf-8")
+                self.send_response(status_code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
             def _handle(self, method: str) -> None:
+                if method == "GET" and self.path == "/__tape__/health":
+                    self._send_json(200, {"status": "ok"})
+                    return
+                if method == "GET" and self.path == "/__tape__/stats":
+                    self._send_json(200, server_ref.stats())
+                    return
+
                 length = int(self.headers.get("Content-Length", "0") or 0)
                 body_bytes = self.rfile.read(length) if length > 0 else b""
                 inter = server_ref._match(method, self.path, body_bytes)
                 if inter is None:
-                    err = json.dumps(
-                        {"error": "unmatched_request", "method": method, "path": self.path}
-                    ).encode("utf-8")
-                    self.send_response(404)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(err)))
-                    self.end_headers()
-                    self.wfile.write(err)
+                    self._send_json(
+                        404,
+                        {"error": "unmatched_request", "method": method, "path": self.path},
+                    )
                     return
 
                 self._write_interaction(inter)
