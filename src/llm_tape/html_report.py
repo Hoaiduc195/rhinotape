@@ -43,6 +43,30 @@ pre { background: rgba(0,0,0,0.2); padding: 10px; border-radius: 6px; overflow-x
 """
 
 
+_FILTER_JS = """
+(function() {
+  const q = document.getElementById('tape-search');
+  const prov = document.getElementById('tape-provider');
+  const st = document.getElementById('tape-status');
+  function apply() {
+    const term = (q.value || '').toLowerCase();
+    const p = prov.value;
+    const s = st.value;
+    document.querySelectorAll('.card').forEach(el => {
+      const okQ = !term || (el.dataset.search || '').includes(term);
+      const okP = !p || el.dataset.provider === p;
+      const code = parseInt(el.dataset.status || '0', 10);
+      const okS = !s || (s === 'ok' ? code < 400 : code >= 400);
+      el.style.display = (okQ && okP && okS) ? '' : 'none';
+    });
+  }
+  q.addEventListener('input', apply);
+  prov.addEventListener('change', apply);
+  st.addEventListener('change', apply);
+})();
+"""
+
+
 def _fmt_body(body: Any) -> str:
     if body is None:
         return ""
@@ -122,6 +146,19 @@ def render_html_report(cassettes: Sequence[Cassette], *, title: str = "llm-tape 
     total_latency = round(sum(inter.latency_ms for _, _, inter in all_interactions), 1)
     max_latency = max((inter.latency_ms for _, _, inter in all_interactions), default=0.0)
 
+    providers = sorted({inter.llm.provider for _, _, inter in all_interactions})
+    prov_opts = "".join(
+        f"<option value='{html.escape(p, quote=True)}'>{html.escape(p)}</option>" for p in providers
+    )
+    controls_html = (
+        "<div class='controls'>"
+        "<input id='tape-search' type='search' placeholder='Filter by model, tool, URL, text...'>"
+        f"<select id='tape-provider'><option value=''>All providers</option>{prov_opts}</select>"
+        "<select id='tape-status'><option value=''>All statuses</option>"
+        "<option value='ok'>2xx/3xx OK</option><option value='err'>4xx/5xx Errors</option></select>"
+        "</div>"
+    )
+
     cards_html = "\n".join(
         _render_interaction_card(cname, idx, inter, max_latency)
         for cname, idx, inter in all_interactions
@@ -149,7 +186,8 @@ def render_html_report(cassettes: Sequence[Cassette], *, title: str = "llm-tape 
         f"<div class='kpi'><div class='label'>Total Latency</div>"
         f"<div class='val'>{total_latency:.1f}ms</div></div>",
         "</div>",
+        controls_html,
         cards_html or "<p>No interactions recorded.</p>",
-        "</div></body></html>\n",
+        f"</div><script>{_FILTER_JS}</script></body></html>\n",
     ]
     return "\n".join(parts)
