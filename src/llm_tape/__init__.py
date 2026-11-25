@@ -2,6 +2,15 @@
 
 from llm_tape._version import __version__
 from llm_tape.cassette import Cassette
+from llm_tape.chaos import (
+    ReplayHook,
+    chain_replay_hooks,
+    corrupt_json_body,
+    fail_first,
+    fail_nth,
+    inject_latency,
+    truncate_stream,
+)
 from llm_tape.matchers import (
     RequestMatcher,
     match_all,
@@ -76,6 +85,7 @@ __all__ = [
     "PII_SSN",
     "RecordedRequest",
     "RecordedResponse",
+    "ReplayHook",
     "RequestMatcher",
     "TapeAssertionError",
     "TapeError",
@@ -89,8 +99,13 @@ __all__ = [
     "Usage",
     "VALID_MATCH_ON",
     "__version__",
+    "chain_replay_hooks",
+    "corrupt_json_body",
     "estimate_cache_savings_usd",
     "estimate_cost_usd",
+    "fail_first",
+    "fail_nth",
+    "inject_latency",
     "load_pricing_file",
     "match_all",
     "match_any",
@@ -105,5 +120,6 @@ __all__ = [
     "replace_response",
     "resolve_pii_patterns",
     "tape",
+    "truncate_stream",
     "use_tape",
 ]
