@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import io
 import json
+import math
 import os
 import tempfile
 import zlib
@@ -296,8 +297,8 @@ class Cassette:
                     f"interactions[{idx}].response has body_encoding='stream' "
                     "but stream_chunks is None"
                 )
-            if inter.latency_ms < 0:
-                issues.append(f"interactions[{idx}].latency_ms is negative: {inter.latency_ms}")
+            if not math.isfinite(inter.latency_ms) or inter.latency_ms < 0:
+                issues.append(f"interactions[{idx}].latency_ms is invalid: {inter.latency_ms}")
         return issues
 
     @classmethod

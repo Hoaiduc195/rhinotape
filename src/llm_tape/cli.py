@@ -1442,15 +1442,20 @@ def _cmd_merge(
     deduplicate: bool = False,
 ) -> int:
     """Merge multiple cassette files or directories into a single output cassette."""
+    output_resolved = output.resolve()
+    seen_files: set[Path] = set()
     files: list[Path] = []
     for src in sources:
         if not src.exists():
             print(f"Error: path not found: {src}", file=sys.stderr)
             return 1
-        if src.is_file():
-            files.append(src)
-        else:
-            files.extend(iter_cassette_files(src))
+        candidates = [src] if src.is_file() else iter_cassette_files(src)
+        for cand in candidates:
+            resolved = cand.resolve()
+            if resolved == output_resolved or resolved in seen_files:
+                continue
+            seen_files.add(resolved)
+            files.append(cand)
     if not files:
         print("Error: no cassette files found to merge.", file=sys.stderr)
         return 1
