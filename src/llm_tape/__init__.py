@@ -1,7 +1,8 @@
-"""llm-tape: Record, replay, and assert on LLM HTTP calls in pytest."""
+"""llm-tape: Record, replay, and assert on LLM HTTP & SSE calls in pytest."""
 
 from llm_tape.cassette import Cassette
 from llm_tape.models import (
+    CorruptCassetteError,
     Interaction,
     LLMCallSummary,
     RecordedRequest,
@@ -21,6 +22,7 @@ from llm_tape.transport import AsyncTapeTransport, TapeTransport
 __all__ = [
     "AsyncTapeTransport",
     "Cassette",
+    "CorruptCassetteError",
     "DEFAULT_PRICING",
     "Interaction",
     "LLMCallSummary",
@@ -41,4 +43,4 @@ __all__ = [
     "use_tape",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

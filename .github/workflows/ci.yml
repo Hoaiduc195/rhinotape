@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        exclude:
+          - os: macos-latest
+            python-version: "3.11"
+          - os: macos-latest
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.11"
+          - os: windows-latest
+            python-version: "3.12"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --python ${{ matrix.python-version }} --extra dev
+
+      - name: Lint & format check with ruff
+        run: |
+          uv run --python ${{ matrix.python-version }} ruff check src tests
+          uv run --python ${{ matrix.python-version }} ruff format --check src tests
+
+      - name: Type-check with mypy
+        run: uv run --python ${{ matrix.python-version }} mypy
+
+      - name: Run pytest with coverage
+        run: uv run --python ${{ matrix.python-version }} pytest -v --cov=llm_tape --cov-report=term-missing
+
+      - name: Build package
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: uv build
+
+      - name: Verify runtime works without pytest installed
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: |
+          uv venv --python ${{ matrix.python-version }} .tmp-no-pytest-venv
+          uv pip install --python .tmp-no-pytest-venv/bin/python dist/*.whl
+          .tmp-no-pytest-venv/bin/python -c "import llm_tape; print(llm_tape.__version__)"
+          .tmp-no-pytest-venv/bin/llm-tape --help
+          rm -rf .tmp-no-pytest-venv

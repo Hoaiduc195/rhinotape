@@ -62,3 +62,24 @@ def test_cli_inspect_and_summary(tmp_path: Path, capsys: pytest.CaptureFixture[s
     out = capsys.readouterr().out
     assert "demo.tape.json" in out
     assert "TOTAL (1 files)" in out
+
+    # JSON output + verify + diff
+    assert cli_main(["inspect", str(cassette_path), "--json"]) == 0
+    assert '"total_tokens": 300' in capsys.readouterr().out
+
+    assert cli_main(["verify", str(tmp_path)]) == 0
+    assert "OK: verified 1 cassette(s)" in capsys.readouterr().out
+
+    assert cli_main(["diff", str(cassette_path), str(cassette_path)]) == 0
+    assert "(+0)" in capsys.readouterr().out
+
+    # Corrupt cassette is reported cleanly by verify and skipped cleanly by summary
+    corrupt = tmp_path / "broken.tape.json"
+    corrupt.write_text("{broken", encoding="utf-8")
+    assert cli_main(["verify", str(tmp_path)]) == 1
+    assert "FAIL" in capsys.readouterr().err
+
+    assert cli_main(["summary", str(tmp_path)]) == 1
+    captured = capsys.readouterr()
+    assert "demo.tape.json" in captured.out
+    assert "skipping corrupt cassette" in captured.err

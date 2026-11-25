@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+_BOUNDARY_CHARS = frozenset({"-", ".", ":", "@"})
+
 
 @dataclass(frozen=True)
 class ModelPrice:
@@ -18,7 +20,7 @@ class ModelPrice:
         ) / 1_000_000.0
 
 
-# Reference USD per 1M tokens (input, output). Users can override via PricingTable.
+# Reference USD per 1M tokens (input, output). Users can override via custom_pricing.
 DEFAULT_PRICING: dict[str, ModelPrice] = {
     # OpenAI
     "gpt-4o": ModelPrice(2.50, 10.00),
@@ -40,19 +42,25 @@ DEFAULT_PRICING: dict[str, ModelPrice] = {
 }
 
 
+def _matches_model_prefix(normalized: str, key: str) -> bool:
+    if normalized == key:
+        return True
+    return normalized.startswith(key) and normalized[len(key)] in _BOUNDARY_CHARS
+
+
 def estimate_cost_usd(
     model: str | None,
     input_tokens: int,
     output_tokens: int,
     custom_pricing: dict[str, ModelPrice] | None = None,
 ) -> float:
-    """Estimate USD cost for a model call using exact or longest-prefix match."""
+    """Estimate USD cost for a model call using exact or boundary-safe longest-prefix match."""
     if not model or (input_tokens == 0 and output_tokens == 0):
         return 0.0
 
     table: dict[str, ModelPrice] = dict(DEFAULT_PRICING)
     if custom_pricing:
-        table.update(custom_pricing)
+        table.update({k.lower().strip(): v for k, v in custom_pricing.items()})
 
     normalized = model.lower().strip()
     if normalized.startswith("models/"):
@@ -61,8 +69,9 @@ def estimate_cost_usd(
     if normalized in table:
         return table[normalized].compute(input_tokens, output_tokens)
 
-    # Longest prefix match (e.g., "gpt-4o-mini-2024-07-18" -> "gpt-4o-mini")
-    matches = [key for key in table if normalized.startswith(key)]
+    # Longest boundary-safe prefix match (e.g., "gpt-4o-mini-2024-07-18" -> "gpt-4o-mini",
+    # while preventing "gpt-4" from matching "gpt-4o").
+    matches = [key for key in table if _matches_model_prefix(normalized, key)]
     if matches:
         best = max(matches, key=len)
         return table[best].compute(input_tokens, output_tokens)

@@ -34,6 +34,10 @@ class TapeNotFoundError(TapeError):
     """Raised in replay mode when the expected cassette file does not exist."""
 
 
+class CorruptCassetteError(TapeError):
+    """Raised when a cassette file cannot be parsed or has an unsupported schema."""
+
+
 class UnmatchedRequestError(TapeError):
     """Raised when an outgoing request does not match any recorded interaction."""
 
@@ -56,7 +60,7 @@ class ToolCall:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ToolCall:
         return cls(
-            name=data["name"],
+            name=str(data["name"]),
             arguments=data.get("arguments", {}),
             call_id=data.get("call_id"),
         )
@@ -98,6 +102,7 @@ class LLMCallSummary:
     estimated_cost_usd: float = 0.0
     tool_calls: tuple[ToolCall, ...] = ()
     text: str = ""
+    is_stream: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -107,17 +112,19 @@ class LLMCallSummary:
             "estimated_cost_usd": round(self.estimated_cost_usd, 8),
             "tool_calls": [tc.to_dict() for tc in self.tool_calls],
             "text": self.text,
+            "is_stream": self.is_stream,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LLMCallSummary:
         return cls(
-            provider=data.get("provider", "unknown"),
+            provider=str(data.get("provider", "unknown")),
             model=data.get("model"),
             usage=Usage.from_dict(data.get("usage", {})),
             estimated_cost_usd=float(data.get("estimated_cost_usd", 0.0)),
             tool_calls=tuple(ToolCall.from_dict(tc) for tc in data.get("tool_calls", [])),
-            text=data.get("text", ""),
+            text=str(data.get("text", "")),
+            is_stream=bool(data.get("is_stream", False)),
         )
 
 
@@ -128,20 +135,26 @@ class RecordedRequest:
     method: str
     url: str
     headers: dict[str, str]
-    body: Any  # Parsed JSON if valid JSON, else UTF-8 string
+    body: Any
     fingerprint: str
+    body_encoding: str = "json"  # "json" | "text" | "base64" | "empty"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RecordedRequest:
+        body = data.get("body")
+        default_enc = (
+            "empty" if body is None else ("json" if isinstance(body, (dict, list)) else "text")
+        )
         return cls(
-            method=data["method"],
-            url=data["url"],
+            method=str(data["method"]),
+            url=str(data["url"]),
             headers=dict(data.get("headers", {})),
-            body=data.get("body"),
-            fingerprint=data["fingerprint"],
+            body=body,
+            fingerprint=str(data["fingerprint"]),
+            body_encoding=str(data.get("body_encoding", default_enc)),
         )
 
 
@@ -151,17 +164,40 @@ class RecordedResponse:
 
     status_code: int
     headers: dict[str, str]
-    body: Any  # Parsed JSON if valid JSON, else UTF-8 string
+    body: Any
+    body_encoding: str = "json"  # "json" | "text" | "base64" | "empty" | "stream"
+    stream_chunks: tuple[str, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload: dict[str, Any] = {
+            "status_code": self.status_code,
+            "headers": self.headers,
+            "body": self.body,
+            "body_encoding": self.body_encoding,
+        }
+        if self.stream_chunks is not None:
+            payload["stream_chunks"] = list(self.stream_chunks)
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RecordedResponse:
+        body = data.get("body")
+        raw_chunks = data.get("stream_chunks")
+        chunks = tuple(str(c) for c in raw_chunks) if raw_chunks is not None else None
+        if chunks is not None:
+            default_enc = "stream"
+        elif body is None:
+            default_enc = "empty"
+        elif isinstance(body, (dict, list)):
+            default_enc = "json"
+        else:
+            default_enc = "text"
         return cls(
             status_code=int(data["status_code"]),
             headers=dict(data.get("headers", {})),
-            body=data.get("body"),
+            body=body,
+            body_encoding=str(data.get("body_encoding", default_enc)),
+            stream_chunks=chunks,
         )
 
 
