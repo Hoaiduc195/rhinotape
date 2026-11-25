@@ -51,6 +51,8 @@ def _detect_provider(
     url_path = urlsplit(lower_url).path.rstrip("/")
     if url_path.endswith(("/api/chat", "/api/generate")):
         return "ollama"
+    if "cohere.com" in lower_url or "cohere.ai" in lower_url:
+        return "cohere"
     if (
         "openai.com" in lower_url
         or "openai.azure.com" in lower_url
@@ -62,6 +64,7 @@ def _detect_provider(
         or "api.fireworks.ai" in lower_url
         or "/chat/completions" in lower_url
         or "/responses" in lower_url
+        or "/embeddings" in lower_url
     ):
         return "openai"
 
@@ -72,22 +75,41 @@ def _detect_provider(
             return "gemini"
         if isinstance(response_body.get("output"), dict) and "message" in response_body["output"]:
             return "bedrock"
+        if isinstance(response_body.get("meta"), dict) and (
+            "billed_units" in response_body["meta"] or "tokens" in response_body["meta"]
+        ):
+            return "cohere"
         if "prompt_eval_count" in response_body or (
             "done" in response_body and ("message" in response_body or "response" in response_body)
         ):
             return "ollama"
-        if "choices" in response_body or "output" in response_body:
+        if (
+            "choices" in response_body
+            or "output" in response_body
+            or (
+                response_body.get("object") == "list"
+                and isinstance(response_body.get("data"), list)
+                and bool(response_body["data"])
+                and isinstance(response_body["data"][0], dict)
+                and response_body["data"][0].get("object") == "embedding"
+            )
+        ):
             return "openai"
 
     for event_name, payload in sse_events:
         if event_name in {"message_start", "content_block_start", "message_delta"}:
             return "anthropic"
+        if event_name in {"content-delta", "message-end", "tool-call-start"}:
+            return "cohere"
         if isinstance(payload, dict):
-            if payload.get("type") in {"message_start", "content_block_delta"}:
+            ptype = payload.get("type")
+            if ptype in {"message_start", "content_block_delta"}:
                 return "anthropic"
+            if ptype in {"content-delta", "message-end", "tool-call-start"}:
+                return "cohere"
             if "candidates" in payload:
                 return "gemini"
-            if "choices" in payload or str(payload.get("type", "")).startswith("response."):
+            if "choices" in payload or str(ptype or "").startswith("response."):
                 return "openai"
 
     return "unknown"
@@ -818,6 +840,128 @@ def _parse_ollama_ndjson(
     )
 
 
+def _parse_cohere_json(
+    request_body: Any,
+    response_body: dict[str, Any],
+    custom_pricing: dict[str, ModelPrice] | None,
+) -> LLMCallSummary:
+    model = response_body.get("model") or (
+        request_body.get("model") if isinstance(request_body, dict) else None
+    )
+    meta = response_body.get("meta") or {}
+    usage_map = meta.get("tokens") or meta.get("billed_units") or {}
+    input_tokens = int(usage_map.get("input_tokens", 0) or 0)
+    output_tokens = int(usage_map.get("output_tokens", 0) or 0)
+    usage = Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+
+    texts: list[str] = []
+    tool_calls: list[ToolCall] = []
+
+    msg = response_body.get("message")
+    if isinstance(msg, dict):
+        for block in msg.get("content") or []:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                texts.append(block["text"])
+        for tc in msg.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                tool_calls.append(
+                    ToolCall(
+                        name=str(fn["name"]),
+                        arguments=_parse_json_args(fn.get("arguments")),
+                        call_id=tc.get("id"),
+                    )
+                )
+    elif isinstance(response_body.get("text"), str) and response_body["text"]:
+        texts.append(response_body["text"])
+
+    for tc in response_body.get("tool_calls") or []:
+        if isinstance(tc, dict) and tc.get("name"):
+            tool_calls.append(
+                ToolCall(
+                    name=str(tc["name"]),
+                    arguments=_parse_json_args(tc.get("parameters")),
+                    call_id=tc.get("id"),
+                )
+            )
+
+    cost = estimate_cost_usd(model, usage.input_tokens, usage.output_tokens, custom_pricing)
+    return LLMCallSummary(
+        provider="cohere",
+        model=model,
+        usage=usage,
+        estimated_cost_usd=cost,
+        tool_calls=tuple(tool_calls),
+        text="\n".join(texts),
+    )
+
+
+def _parse_cohere_sse(
+    request_body: Any,
+    events: Sequence[tuple[str | None, Any]],
+    custom_pricing: dict[str, ModelPrice] | None,
+) -> LLMCallSummary:
+    model: str | None = request_body.get("model") if isinstance(request_body, dict) else None
+    input_tokens = 0
+    output_tokens = 0
+    text_parts: list[str] = []
+    tool_acc: dict[int, dict[str, Any]] = {}
+
+    for ev_name, payload in events:
+        if not isinstance(payload, dict):
+            continue
+        etype = payload.get("type") or ev_name
+        delta = payload.get("delta") or {}
+
+        if etype == "content-delta":
+            content = (delta.get("message") or {}).get("content") or {}
+            if isinstance(content.get("text"), str):
+                text_parts.append(content["text"])
+        elif etype == "tool-call-start":
+            idx = int(payload.get("index", 0))
+            tc = (delta.get("message") or {}).get("tool_calls") or {}
+            fn = tc.get("function") or {}
+            tool_acc[idx] = {
+                "id": tc.get("id"),
+                "name": str(fn.get("name", "")),
+                "args": [str(fn["arguments"])] if isinstance(fn.get("arguments"), str) else [],
+            }
+        elif etype == "tool-call-delta":
+            idx = int(payload.get("index", 0))
+            tc = (delta.get("message") or {}).get("tool_calls") or {}
+            fn = tc.get("function") or {}
+            if idx in tool_acc and isinstance(fn.get("arguments"), str):
+                tool_acc[idx]["args"].append(fn["arguments"])
+        elif etype == "message-end":
+            u = delta.get("usage") or {}
+            toks = u.get("tokens") or u.get("billed_units") or {}
+            input_tokens = int(toks.get("input_tokens", input_tokens) or 0)
+            output_tokens = int(toks.get("output_tokens", output_tokens) or 0)
+
+    tool_calls = tuple(
+        ToolCall(
+            name=slot["name"],
+            arguments=_parse_json_args("".join(slot["args"])),
+            call_id=slot["id"],
+        )
+        for _, slot in sorted(tool_acc.items())
+        if slot["name"]
+    )
+    usage = Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+    cost = estimate_cost_usd(model, usage.input_tokens, usage.output_tokens, custom_pricing)
+    return LLMCallSummary(
+        provider="cohere",
+        model=model,
+        usage=usage,
+        estimated_cost_usd=cost,
+        tool_calls=tool_calls,
+        text="".join(text_parts),
+        is_stream=True,
+    )
+
+
 def parse_llm_interaction(
     url: str,
     request_body: Any,
@@ -845,6 +989,8 @@ def parse_llm_interaction(
             return _parse_anthropic_sse(request_body, events, custom_pricing)
         if provider == "gemini":
             return _parse_gemini_sse(url, events, custom_pricing)
+        if provider == "cohere":
+            return _parse_cohere_sse(request_body, events, custom_pricing)
         return LLMCallSummary(provider="unknown", is_stream=True)
 
     if not isinstance(response_body, dict):
@@ -861,4 +1007,6 @@ def parse_llm_interaction(
         return _parse_ollama_json(request_body, response_body, custom_pricing)
     if provider == "bedrock":
         return _parse_bedrock_json(url, request_body, response_body, custom_pricing)
+    if provider == "cohere":
+        return _parse_cohere_json(request_body, response_body, custom_pricing)
     return LLMCallSummary(provider="unknown")

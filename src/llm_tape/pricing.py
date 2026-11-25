@@ -52,6 +52,9 @@ DEFAULT_PRICING: dict[str, ModelPrice] = {
     "o3": ModelPrice(2.00, 8.00, cached_input_per_million=0.50),
     "o3-mini": ModelPrice(1.10, 4.40, cached_input_per_million=0.55),
     "o4-mini": ModelPrice(1.10, 4.40, cached_input_per_million=0.275),
+    "text-embedding-3-small": ModelPrice(0.02, 0.0),
+    "text-embedding-3-large": ModelPrice(0.13, 0.0),
+    "text-embedding-ada-002": ModelPrice(0.10, 0.0),
     # Anthropic
     "claude-3-5-sonnet": ModelPrice(3.00, 15.00, cached_input_per_million=0.30),
     "claude-3-5-haiku": ModelPrice(0.80, 4.00, cached_input_per_million=0.08),
@@ -70,6 +73,10 @@ DEFAULT_PRICING: dict[str, ModelPrice] = {
     # Mistral
     "mistral-large": ModelPrice(2.00, 6.00),
     "mistral-small": ModelPrice(0.10, 0.30),
+    # Cohere
+    "command-a": ModelPrice(2.50, 10.00),
+    "command-r-plus": ModelPrice(2.50, 10.00),
+    "command-r": ModelPrice(0.15, 0.60),
 }
 
 
