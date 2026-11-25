@@ -70,3 +70,19 @@ def test_wave20_cli_split(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     parts = sorted(out_dir.glob("*.tape.json.gz"))
     assert len(parts) == 3
     assert Cassette.load(parts[1]).interactions[0].request.fingerprint == "y"
+
+
+def test_wave21_cassette_clone_and_stats(tmp_path: Path) -> None:
+    c = Cassette(
+        path=tmp_path / "orig.tape.json",
+        interactions=[_mk_inter("a", latency=12.5, tokens=30, cost=0.002)],
+        metadata={"env": "ci"},
+    )
+    cloned = c.clone(tmp_path / "copy.tape.json.gz")
+    assert cloned.path == tmp_path / "copy.tape.json.gz"
+    assert cloned.content_hash() == c.content_hash()
+    st = cloned.stats()
+    assert st["calls"] == 1
+    assert st["total_tokens"] == 30
+    assert st["estimated_cost_usd"] == 0.002
+    assert st["latency_ms"] == 12.5

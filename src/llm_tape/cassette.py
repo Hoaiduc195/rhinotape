@@ -222,6 +222,33 @@ class Cassette:
             metadata=dict(self.metadata),
         )
 
+    def clone(self, new_path: str | Path) -> Cassette:
+        """Return a shallow copy of this Cassette pointing to a new path."""
+        return Cassette(
+            path=Path(new_path),
+            interactions=list(self.interactions),
+            recorded_at=self.recorded_at,
+            metadata=dict(self.metadata),
+        )
+
+    def stats(self) -> dict[str, Any]:
+        """Return summary statistics (calls, token breakdown, cost, latency, tools)."""
+        return {
+            "path": str(self.path),
+            "recorded_at": self.recorded_at,
+            "calls": len(self.interactions),
+            "input_tokens": sum(i.llm.usage.input_tokens for i in self.interactions),
+            "cached_input_tokens": sum(i.llm.usage.cached_input_tokens for i in self.interactions),
+            "output_tokens": sum(i.llm.usage.output_tokens for i in self.interactions),
+            "reasoning_tokens": sum(i.llm.usage.reasoning_tokens for i in self.interactions),
+            "total_tokens": sum(i.llm.usage.total_tokens for i in self.interactions),
+            "estimated_cost_usd": round(
+                sum(i.llm.estimated_cost_usd for i in self.interactions), 8
+            ),
+            "latency_ms": round(sum(i.latency_ms for i in self.interactions), 2),
+            "tools": [tc.name for i in self.interactions for tc in i.llm.tool_calls],
+        }
+
     @classmethod
     def load(cls, path: str | Path) -> Cassette:
         cassette_path = Path(path)
