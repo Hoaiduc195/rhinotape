@@ -155,3 +155,36 @@ def test_urllib_record_replay_sse_and_http_error(tmp_path: Path) -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_urllib_rv_review_regressions_file_url_bytesio_and_content_encoding(
+    tmp_path: Path,
+) -> None:
+    import gzip
+    import io
+
+    from llm_tape.urllib_adapter import _build_email_headers, _extract_urllib_request
+
+    # P1 #1: Content-Encoding header preserved alongside raw bytes
+    hdrs = _build_email_headers({"Content-Encoding": "gzip", "Content-Type": "application/json"})
+    assert hdrs.get("Content-Encoding") == "gzip"
+
+    # P2 #3: file-like BytesIO Request.data reads deterministically & updates req.data
+    req = urllib.request.Request(
+        "https://api.openai.com/v1/chat/completions",
+        data=io.BytesIO(b'{"a":1}'),
+        method="POST",
+    )
+    _m, _u, _h, body_bytes, _d = _extract_urllib_request(req, None)
+    assert body_bytes == b'{"a":1}'
+    assert req.data == b'{"a":1}'
+
+    # P2 #4: file:// URLs pass through unintercepted
+    local_file = tmp_path / "sample.txt"
+    local_file.write_text("local-content", encoding="utf-8")
+    tape_path = tmp_path / "file_passthrough.tape.json"
+    with tape(tape_path, mode=TapeMode.RECORD, patch_urllib=True) as s:
+        with urllib.request.urlopen(local_file.as_uri()) as resp:
+            assert resp.read().decode() == "local-content"
+        s.assert_call_count(0)
+    assert gzip.compress(b"x")[:2] == b"\x1f\x8b"

@@ -9,12 +9,14 @@ import contextvars
 import email.message
 import http
 import io
+import socket
 import threading
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from llm_tape.models import Interaction, TapeMode
 from llm_tape.scrubbing import encode_body_with_encoding
@@ -22,8 +24,10 @@ from llm_tape.scrubbing import encode_body_with_encoding
 if TYPE_CHECKING:
     from llm_tape.session import TapeSession
 
-_STRIP_REPLAY_HEADERS = frozenset({"content-encoding", "transfer-encoding", "content-length"})
+# urllib does not auto-decompress responses, so preserve content-encoding alongside raw bytes
+_STRIP_REPLAY_HEADERS = frozenset({"transfer-encoding", "content-length"})
 _SSE_CONTENT_TYPES = ("text/event-stream", "application/x-ndjson", "application/ndjson")
+_GLOBAL_DEFAULT_TIMEOUT: Any = getattr(socket, "_GLOBAL_DEFAULT_TIMEOUT", object())
 
 _patch_lock = threading.Lock()
 _patch_refcount = 0
@@ -103,23 +107,25 @@ class _ReplayUrllibResponse:
 
 def _extract_urllib_request(
     fullurl: str | urllib.request.Request, data: Any
-) -> tuple[str, str, list[tuple[str, str]], bytes]:
+) -> tuple[str, str, list[tuple[str, str]], bytes, Any]:
+    req: urllib.request.Request | None = None
     if isinstance(fullurl, urllib.request.Request):
         req = fullurl
-        url = req.full_url
-        req_data = data if data is not None else req.data
+        url = fullurl.full_url
+        req_data = data if data is not None else fullurl.data
         method = (
-            req.get_method().upper()
+            fullurl.get_method().upper()
             if req_data is None
-            else (req.method.upper() if req.method else "POST")
+            else (fullurl.method.upper() if fullurl.method else "POST")
         )
-        headers = list(req.header_items())
+        headers = list(fullurl.header_items())
     else:
         url = str(fullurl)
         req_data = data
         method = "POST" if req_data is not None else "GET"
         headers = []
 
+    updated_data = data
     if req_data is None:
         body_bytes = b""
     elif isinstance(req_data, bytes):
@@ -128,9 +134,23 @@ def _extract_urllib_request(
         body_bytes = bytes(req_data)
     elif isinstance(req_data, str):
         body_bytes = req_data.encode("utf-8")
+    elif hasattr(req_data, "read"):
+        raw = req_data.read()
+        body_bytes = raw.encode("utf-8") if isinstance(raw, str) else bytes(raw)
+        if req is not None and data is None:
+            req.data = body_bytes
+        else:
+            updated_data = body_bytes
+    elif isinstance(req_data, Iterable):
+        chunks = [c.encode("utf-8") if isinstance(c, str) else bytes(c) for c in req_data]
+        body_bytes = b"".join(chunks)
+        if req is not None and data is None:
+            req.data = body_bytes
+        else:
+            updated_data = body_bytes
     else:
         body_bytes = str(req_data).encode("utf-8")
-    return method, url, headers, body_bytes
+    return method, url, headers, body_bytes, updated_data
 
 
 def _build_replay_urllib_result(url: str, interaction: Interaction) -> _ReplayUrllibResponse:
@@ -163,7 +183,7 @@ def _dispatched_opener_open(
     opener: urllib.request.OpenerDirector,
     fullurl: str | urllib.request.Request,
     data: Any = None,
-    timeout: Any = None,
+    timeout: Any = _GLOBAL_DEFAULT_TIMEOUT,
 ) -> Any:
     with _patch_lock:
         orig = _orig_opener_open
@@ -176,8 +196,8 @@ def _dispatched_opener_open(
     if session is None or session.mode is TapeMode.NONE:
         return orig(opener, fullurl, data=data, timeout=timeout)
 
-    method, url, headers, body_bytes = _extract_urllib_request(fullurl, data)
-    if session._should_ignore_url(url):
+    method, url, headers, body_bytes, data = _extract_urllib_request(fullurl, data)
+    if urlsplit(url).scheme.lower() not in {"http", "https"} or session._should_ignore_url(url):
         return orig(opener, fullurl, data=data, timeout=timeout)
 
     recorded_req = session._build_recorded_request_parts(
@@ -205,6 +225,10 @@ def _dispatched_opener_open(
             resp = orig(opener, fullurl, data=data, timeout=timeout)
         except urllib.error.HTTPError as err:
             raw_err = err.read()
+            try:
+                err.close()
+            except Exception:
+                pass
             latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
             err_headers = list(err.headers.items()) if err.headers is not None else []
             session._record_interaction_parts(
