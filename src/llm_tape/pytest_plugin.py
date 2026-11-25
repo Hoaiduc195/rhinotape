@@ -381,6 +381,7 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
         allow_playback_repeats=bool(marker_kwargs.get("allow_playback_repeats", False)),
         save_on_error=bool(marker_kwargs.get("save_on_error", False)),
         patch_requests=bool(marker_kwargs.get("patch_requests", True)),
+        patch_aiohttp=bool(marker_kwargs.get("patch_aiohttp", True)),
     )
     session.__enter__()
     try:

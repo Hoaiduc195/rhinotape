@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from llm_tape._version import __version__
+from llm_tape.aiohttp_adapter import acquire_aiohttp_patch, release_aiohttp_patch
 from llm_tape.cassette import Cassette
 from llm_tape.models import (
     Interaction,
@@ -355,6 +356,7 @@ class TapeSession:
         save_on_error: bool = False,
         patch_httpx: bool = True,
         patch_requests: bool = True,
+        patch_aiohttp: bool = True,
     ) -> None:
         if not math.isfinite(replay_latency_scale) or replay_latency_scale < 0.0:
             raise ValueError("replay_latency_scale must be a finite number >= 0.0")
@@ -382,6 +384,7 @@ class TapeSession:
         self.save_on_error = save_on_error
         self.patch_httpx = patch_httpx
         self.patch_requests = patch_requests
+        self.patch_aiohttp = patch_aiohttp
 
         self._lock = threading.Lock()
         self._interactions: list[Interaction] = []
@@ -398,6 +401,7 @@ class TapeSession:
         self._ctx_token: contextvars.Token[TapeSession | None] | None = None
         self._patch_acquired = False
         self._requests_patch_acquired = False
+        self._aiohttp_patch_acquired = False
 
     # --- Lifecycle ---------------------------------------------------------
 
@@ -461,7 +465,9 @@ class TapeSession:
                 self._all_loaded_requests.append(interaction.request)
 
     def _install_httpx_patch(self) -> None:
-        if self.mode is TapeMode.NONE or (not self.patch_httpx and not self.patch_requests):
+        if self.mode is TapeMode.NONE or (
+            not self.patch_httpx and not self.patch_requests and not self.patch_aiohttp
+        ):
             return
         self._ctx_token = _active_session.set(self)
         try:
@@ -470,6 +476,8 @@ class TapeSession:
                 self._patch_acquired = True
             if self.patch_requests:
                 self._requests_patch_acquired = acquire_requests_patch(_active_session.get)
+            if self.patch_aiohttp:
+                self._aiohttp_patch_acquired = acquire_aiohttp_patch(_active_session.get)
         except Exception:
             self._uninstall_httpx_patch()
             raise
@@ -485,12 +493,17 @@ class TapeSession:
                     release_requests_patch()
                     self._requests_patch_acquired = False
             finally:
-                if self._ctx_token is not None:
-                    try:
-                        _active_session.reset(self._ctx_token)
-                    except ValueError:
-                        pass
-                    self._ctx_token = None
+                try:
+                    if self._aiohttp_patch_acquired:
+                        release_aiohttp_patch()
+                        self._aiohttp_patch_acquired = False
+                finally:
+                    if self._ctx_token is not None:
+                        try:
+                            _active_session.reset(self._ctx_token)
+                        except ValueError:
+                            pass
+                        self._ctx_token = None
 
     def _finalize(self, *, exc_occurred: bool = False) -> None:
         try:
@@ -1205,6 +1218,7 @@ def tape(
     save_on_error: bool = False,
     patch_httpx: bool = True,
     patch_requests: bool = True,
+    patch_aiohttp: bool = True,
 ) -> TapeSession:
     """Create a TapeSession context manager for recording/replaying LLM calls."""
     return TapeSession(
@@ -1228,6 +1242,7 @@ def tape(
         save_on_error=save_on_error,
         patch_httpx=patch_httpx,
         patch_requests=patch_requests,
+        patch_aiohttp=patch_aiohttp,
     )
 
 
