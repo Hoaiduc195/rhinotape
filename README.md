@@ -2,16 +2,16 @@
 
 Lightweight **record, replay, and assertion** library for testing LLM-powered Python apps in `pytest` — zero API cost in CI, automatic secret scrubbing, **true sync & async SSE streaming**, and built-in assertions for **token budgets, USD cost, and tool-calling sequences**.
 
-Works transparently with any SDK built on `httpx` (`openai`, `anthropic`, `google-genai`, or raw `httpx.Client` / `httpx.AsyncClient`) without modifying your application code.
+Works transparently with any SDK built on `httpx` (`openai`, `anthropic`, `google-genai`, or raw `httpx.Client` / `httpx.AsyncClient`) and optionally `requests` (`pip install llm-tape[requests]`) without modifying your application code.
 
 ## Features
 
-- **Record & Replay (`once`, `replay`, `record`, `none`):** Record real LLM HTTP & SSE streaming calls once into human-readable `.tape.json` files (schema v2 with atomic writes), then replay offline deterministically in milliseconds.
-- **True SSE Streaming (Sync & Async):** Incrementally decodes UTF-8 across TCP chunk boundaries, only commits completed streams (aborted streams are ignored), and replays chunk-by-chunk via `iter_lines()` / `aiter_text()`.
-- **Concurrency & Nesting Safe:** Uses a `contextvars.ContextVar` + reference-counted `httpx` dispatcher — safe for nested `with tape(...)` blocks and concurrent `asyncio.gather(...)` tasks.
-- **Automatic Secret & PII Scrubbing:** Redacts `Authorization`, `x-api-key`, `x-goog-api-key`, `ocp-apim-subscription-key`, `x-amz-security-token`, cookies, URL basic-auth userinfo, `?key=` query parameters, plus body `redact_fields`, `redact_patterns` (regex on JSON & SSE streams), and custom `scrub_body` hooks.
+- **Record & Replay (`once`, `replay`, `record`, `none`):** Record real LLM HTTP & SSE streaming calls once into human-readable `.tape.json` or deterministic gzip-compressed `.tape.json.gz` files (schema v2 with atomic writes and bounded decompression safety), then replay offline deterministically in milliseconds.
+- **True SSE Streaming (Sync & Async):** Incrementally decodes UTF-8 across TCP chunk boundaries, supports `gzip`/`deflate`/`br`/`zstd` streams, only commits completed streams (aborted streams are ignored), and replays chunk-by-chunk via `iter_lines()` / `aiter_text()`.
+- **Concurrency & Nesting Safe:** Uses a `contextvars.ContextVar` + reference-counted `httpx` and optional `requests` dispatchers — safe for nested `with tape(...)` blocks, concurrent `asyncio.gather(...)` tasks, and `pytest-xdist`.
+- **Automatic Secret & PII Scrubbing:** Redacts `Authorization`, `x-api-key`, `x-goog-api-key`, `ocp-apim-subscription-key`, `x-amz-security-token`, cookies, URL basic-auth userinfo, `?key=` query parameters, plus body `redact_fields`, pre-compiled `redact_patterns` (regex on JSON & cross-chunk SSE streams), and custom `scrub_body` hooks.
 - **Flexible Filtering, Matching & Latency Replay:** Ignore non-LLM traffic (`ignore_localhost`, `ignore_hosts`, `ignore_request`), ignore volatile JSON fields (`ignore_fields=["metadata.trace_id", "messages.*.id"]`) and query params (`ignore_query_params`), customize `match_on` or `custom_matcher`, simulate timing with `replay_latency_scale`, and get a clean unified diff on `UnmatchedRequestError`.
-- **LLM-Aware Parsing & Cached Token Pricing:** Automatically extracts provider, model, token usage (including OpenAI/Anthropic/Gemini cached input tokens and Gemini thinking tokens), estimated USD cost (override via `custom_pricing` or `LLM_TAPE_PRICING_FILE`), response text, and tool calls for:
+- **LLM-Aware Parsing, Reasoning Tokens & Cached Pricing:** Automatically extracts provider, model, token usage (including OpenAI/Anthropic/Gemini/Bedrock cached input tokens and OpenAI/Gemini reasoning tokens), estimated USD cost (including `o3`, `o4-mini`, `gpt-4.1`, `claude-sonnet-4`, `gemini-2.5-*`, overrideable via `custom_pricing` or `LLM_TAPE_PRICING_FILE`), response text, and tool calls for:
   - **OpenAI / Azure OpenAI / OpenRouter** (Chat Completions & Responses API, JSON & SSE)
   - **Anthropic** (Messages API, JSON & SSE)
   - **Google Gemini / Vertex AI** (`:generateContent` & `:streamGenerateContent`, JSON & SSE)
@@ -20,18 +20,22 @@ Works transparently with any SDK built on `httpx` (`openai`, `anthropic`, `googl
 - **Built-in Assertions:**
   - `session.assert_cost_under(0.01)`
   - `session.assert_tokens_under(2000)`
+  - `session.assert_cached_tokens_at_least(500)`
+  - `session.assert_model("gpt-4o-mini")` / `session.assert_provider("openai")`
   - `session.assert_tool_called("search_docs", min_times=1)`
   - `session.assert_tool_args("search_docs", {"query": "pytest"})`
   - `session.assert_tool_sequence(["search_docs", "summarize"])`
-  - `session.assert_call_count(2)`
+  - `session.assert_call_count(2)` / `session.assert_no_errors()`
   - `session.assert_no_unused_interactions()`
   - `session.assert_max_latency_ms(2000.0)`
-- **Pytest Plugin + CI-ready CLI:** Auto-discovered `llm_tape` fixture (`--tape-mode`, `--tape-dir`, `@pytest.mark.tape(...)`, `pyproject.toml` ini defaults) and `llm-tape inspect | summary | verify | diff | redact` CLI with `--json` and CI budget gates (`--max-cost`, `--max-tokens`).
+- **Pytest Plugin + CI-ready CLI:** Auto-discovered `llm_tape` fixture (`--tape-mode`, `--tape-dir`, `--tape-compress`, `--tape-report`, `--tape-json-report`, `--tape-max-cost`, `--tape-max-tokens`, `@pytest.mark.tape(...)`, `pyproject.toml` ini defaults, `pytest-xdist`-safe) and `llm-tape inspect | summary | verify | diff | redact | prune` CLI with `--json` and CI regression/secret gates.
 
 ## Installation
 
 ```bash
 pip install llm-tape
+# Optional requests adapter:
+pip install "llm-tape[requests]"
 # or with uv:
 uv add --dev llm-tape
 ```
@@ -102,18 +106,29 @@ pytest --tape-mode=record
 ### 3. CLI Commands
 
 ```bash
-# Inspect a single cassette (human-readable or JSON)
-llm-tape inspect tests/tapes/test_agent/agent_search.tape.json
+# Inspect a single cassette (human-readable or JSON; supports .tape.json & .tape.json.gz)
 llm-tape inspect tests/tapes/test_agent/agent_search.tape.json --json
 
-# Summarize all cassettes in a directory
-llm-tape summary tests/tapes --json
+# Summarize all cassettes with optional CI budget gates
+llm-tape summary tests/tapes --max-cost 0.50 --max-tokens 200000
 
-# Validate all cassettes in CI (fails on corrupt JSON or unsupported schema)
-llm-tape verify tests/tapes
+# Validate all cassettes & scan for leaked API keys/tokens in CI
+llm-tape verify tests/tapes --check-secrets
 
-# Compare calls, tokens, cost, and tool sequences between two cassettes
-llm-tape diff baseline.tape.json candidate.tape.json
+# Compare two cassettes or two cassette directories with CI regression gates
+llm-tape diff baseline_tapes/ candidate_tapes/ --max-cost-increase-pct 15 --fail-on-tool-change
+
+# Re-scrub secrets/PII in existing cassettes (preview with --dry-run)
+llm-tape redact tests/tapes --field user.email --pattern "sk-[A-Za-z0-9]+" --dry-run
+
+# Find (dry-run) or remove (--apply) orphaned or stale cassettes
+llm-tape prune tests/tapes --tests-dir tests/ --older-than-days 30
+```
+
+Run pytest with terminal cost summary & JSON report for CI:
+
+```bash
+pytest --tape-mode=replay --tape-report --tape-json-report=tape-report.json --tape-max-cost=0.50
 ```
 
 ## Development
