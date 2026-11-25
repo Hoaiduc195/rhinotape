@@ -12,6 +12,38 @@ from llm_tape.session import replace_response
 ReplayHook = Callable[[Interaction, int], Interaction | None]
 
 
+def _merge_fault_headers(
+    orig_headers: dict[str, str],
+    extra_headers: dict[str, str] | None,
+    body: Any,
+) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    key_map: dict[str, str] = {}
+    for k, v in orig_headers.items():
+        low = k.lower()
+        if low in key_map:
+            del merged[key_map[low]]
+        key_map[low] = k
+        merged[k] = v
+
+    explicit_ct = False
+    if extra_headers:
+        for k, v in extra_headers.items():
+            low = k.lower()
+            if low == "content-type":
+                explicit_ct = True
+            if low in key_map:
+                del merged[key_map[low]]
+            key_map[low] = k
+            merged[k] = v
+
+    if isinstance(body, (dict, list)) and not explicit_ct:
+        if "content-type" in key_map:
+            del merged[key_map["content-type"]]
+        merged["content-type"] = "application/json"
+    return merged
+
+
 def fail_nth(
     n: int,
     *,
@@ -31,14 +63,11 @@ def fail_nth(
     def _hook(interaction: Interaction, call_index: int) -> Interaction | None:
         if call_index != n:
             return None
-        merged_headers = dict(interaction.response.headers)
-        if headers:
-            merged_headers.update(headers)
         return replace_response(
             interaction,
             status_code=status_code,
             body=err_body,
-            headers=merged_headers,
+            headers=_merge_fault_headers(interaction.response.headers, headers, err_body),
         )
 
     return _hook
@@ -63,14 +92,11 @@ def fail_first(
     def _hook(interaction: Interaction, call_index: int) -> Interaction | None:
         if call_index >= k:
             return None
-        merged_headers = dict(interaction.response.headers)
-        if headers:
-            merged_headers.update(headers)
         return replace_response(
             interaction,
             status_code=status_code,
             body=err_body,
-            headers=merged_headers,
+            headers=_merge_fault_headers(interaction.response.headers, headers, err_body),
         )
 
     return _hook

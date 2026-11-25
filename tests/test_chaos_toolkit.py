@@ -146,6 +146,17 @@ def test_truncate_stream_and_validation(tmp_path: Path) -> None:
                 assert '"b"' not in body
                 assert "[DONE]" not in body
 
+    # Failing an SSE interaction normalizes Content-Type to application/json
+    with tape(cassette_path, mode=TapeMode.REPLAY, on_replay=fail_nth(0, status_code=429)):
+        with httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(500))) as client:
+            resp = client.post(
+                "https://api.openai.com/v1/chat/completions",
+                json={"model": "gpt-4o-mini", "stream": True},
+            )
+            assert resp.status_code == 429
+            assert resp.headers["content-type"] == "application/json"
+            assert "error" in resp.json()
+
     with pytest.raises(ValueError):
         fail_nth(-1)
     with pytest.raises(ValueError):
