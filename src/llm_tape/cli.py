@@ -6,6 +6,7 @@ import argparse
 import ast
 import base64
 import csv
+import difflib
 import io
 import json
 import math
@@ -487,6 +488,7 @@ def _cmd_diff(
     max_cost_increase: float | None = None,
     max_cost_increase_pct: float | None = None,
     fail_on_tool_change: bool = False,
+    show_text_diff: bool = False,
 ) -> int:
     """Compare calls, tokens, cached tokens, cost, latency, and tools between cassettes or dirs."""
     if not path_a.exists():
@@ -512,8 +514,31 @@ def _cmd_diff(
             fail_on_tool_change=fail_on_tool_change,
         )
 
-    stats_a = _cassette_stats(Cassette.load(path_a))
-    stats_b = _cassette_stats(Cassette.load(path_b))
+    cass_a = Cassette.load(path_a)
+    cass_b = Cassette.load(path_b)
+    stats_a = _cassette_stats(cass_a)
+    stats_b = _cassette_stats(cass_b)
+    text_diff_lines: list[str] = []
+    if show_text_diff:
+        a_lines = [
+            line
+            for idx, i in enumerate(cass_a.interactions, start=1)
+            for line in [f"--- interaction[{idx}] ---", *i.llm.text.splitlines()]
+        ]
+        b_lines = [
+            line
+            for idx, i in enumerate(cass_b.interactions, start=1)
+            for line in [f"--- interaction[{idx}] ---", *i.llm.text.splitlines()]
+        ]
+        text_diff_lines = list(
+            difflib.unified_diff(
+                a_lines,
+                b_lines,
+                fromfile=str(path_a),
+                tofile=str(path_b),
+                lineterm="",
+            )
+        )
 
     delta_calls = int(stats_b["calls"]) - int(stats_a["calls"])
     delta_tokens = int(stats_b["total_tokens"]) - int(stats_a["total_tokens"])
@@ -536,24 +561,22 @@ def _cmd_diff(
         print(f"Regression gate failed: {msg}", file=sys.stderr)
 
     if as_json:
-        print(
-            json.dumps(
-                {
-                    "before": stats_a,
-                    "after": stats_b,
-                    "delta": {
-                        "calls": delta_calls,
-                        "total_tokens": delta_tokens,
-                        "cached_input_tokens": delta_cached,
-                        "estimated_cost_usd": delta_cost,
-                        "latency_ms": delta_latency,
-                        "tools_changed": tools_changed,
-                    },
-                    "violations": violations,
-                },
-                indent=2,
-            )
-        )
+        payload: dict[str, Any] = {
+            "before": stats_a,
+            "after": stats_b,
+            "delta": {
+                "calls": delta_calls,
+                "total_tokens": delta_tokens,
+                "cached_input_tokens": delta_cached,
+                "estimated_cost_usd": delta_cost,
+                "latency_ms": delta_latency,
+                "tools_changed": tools_changed,
+            },
+            "violations": violations,
+        }
+        if show_text_diff:
+            payload["text_diff"] = text_diff_lines
+        print(json.dumps(payload, indent=2))
         return 1 if violations else 0
 
     print(f"Comparing {path_a} -> {path_b}")
@@ -574,6 +597,13 @@ def _cmd_diff(
         f"{stats_b['latency_ms']:.1f}ms ({delta_latency:+.1f}ms)"
     )
     print(f"  Tools    : {stats_a['tools']} -> {stats_b['tools']}")
+    if show_text_diff:
+        if text_diff_lines:
+            print("\nResponse Text Diff:")
+            for line in text_diff_lines:
+                print(line)
+        else:
+            print("\nResponse Text Diff: (identical)")
     return 1 if violations else 0
 
 
@@ -2041,6 +2071,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Fail with exit code 1 if tool call sequences changed.",
     )
+    p_diff.add_argument(
+        "--show-text-diff",
+        action="store_true",
+        help="Include unified diff of parsed LLM response text (file vs file).",
+    )
 
     p_prune = sub.add_parser(
         "prune",
@@ -2367,6 +2402,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_cost_increase=args.max_cost_increase,
                 max_cost_increase_pct=args.max_cost_increase_pct,
                 fail_on_tool_change=args.fail_on_tool_change,
+                show_text_diff=args.show_text_diff,
             )
         if args.command == "prune":
             return _cmd_prune(
