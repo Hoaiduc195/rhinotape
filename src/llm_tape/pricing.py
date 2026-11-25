@@ -17,11 +17,12 @@ _pricing_file_cache: dict[str, tuple[int, int, dict[str, ModelPrice]]] = {}
 
 @dataclass(frozen=True)
 class ModelPrice:
-    """Price in USD per 1 million tokens (with optional cached input token rate)."""
+    """Price in USD per 1 million tokens (with optional cached read/write input rates)."""
 
     input_per_million: float
     output_per_million: float
     cached_input_per_million: float | None = None
+    cache_write_per_million: float | None = None
 
     def compute(
         self,
@@ -29,17 +30,35 @@ class ModelPrice:
         output_tokens: int,
         *,
         cached_input_tokens: int = 0,
+        cache_creation_tokens: int = 0,
     ) -> float:
-        if cached_input_tokens > 0 and self.cached_input_per_million is not None:
-            billable_cached = min(cached_input_tokens, input_tokens)
-            non_cached_input = max(0, input_tokens - billable_cached)
-            return (
-                non_cached_input * self.input_per_million
-                + billable_cached * self.cached_input_per_million
-                + output_tokens * self.output_per_million
-            ) / 1_000_000.0
+        billable_cached = (
+            min(cached_input_tokens, input_tokens)
+            if cached_input_tokens > 0 and self.cached_input_per_million is not None
+            else 0
+        )
+        remaining = max(0, input_tokens - billable_cached)
+        billable_write = (
+            min(cache_creation_tokens, remaining)
+            if cache_creation_tokens > 0 and self.cache_write_per_million is not None
+            else 0
+        )
+        non_cached_input = max(0, remaining - billable_write)
+        cached_rate = (
+            self.cached_input_per_million
+            if self.cached_input_per_million is not None
+            else self.input_per_million
+        )
+        write_rate = (
+            self.cache_write_per_million
+            if self.cache_write_per_million is not None
+            else self.input_per_million
+        )
         return (
-            input_tokens * self.input_per_million + output_tokens * self.output_per_million
+            non_cached_input * self.input_per_million
+            + billable_cached * cached_rate
+            + billable_write * write_rate
+            + output_tokens * self.output_per_million
         ) / 1_000_000.0
 
 
@@ -59,12 +78,24 @@ DEFAULT_PRICING: dict[str, ModelPrice] = {
     "text-embedding-3-large": ModelPrice(0.13, 0.0),
     "text-embedding-ada-002": ModelPrice(0.10, 0.0),
     # Anthropic
-    "claude-3-5-sonnet": ModelPrice(3.00, 15.00, cached_input_per_million=0.30),
-    "claude-3-5-haiku": ModelPrice(0.80, 4.00, cached_input_per_million=0.08),
-    "claude-3-7-sonnet": ModelPrice(3.00, 15.00, cached_input_per_million=0.30),
-    "claude-sonnet-4": ModelPrice(3.00, 15.00, cached_input_per_million=0.30),
-    "claude-opus-4": ModelPrice(15.00, 75.00, cached_input_per_million=1.50),
-    "claude-haiku-4": ModelPrice(1.00, 5.00, cached_input_per_million=0.10),
+    "claude-3-5-sonnet": ModelPrice(
+        3.00, 15.00, cached_input_per_million=0.30, cache_write_per_million=3.75
+    ),
+    "claude-3-5-haiku": ModelPrice(
+        0.80, 4.00, cached_input_per_million=0.08, cache_write_per_million=1.00
+    ),
+    "claude-3-7-sonnet": ModelPrice(
+        3.00, 15.00, cached_input_per_million=0.30, cache_write_per_million=3.75
+    ),
+    "claude-sonnet-4": ModelPrice(
+        3.00, 15.00, cached_input_per_million=0.30, cache_write_per_million=3.75
+    ),
+    "claude-opus-4": ModelPrice(
+        15.00, 75.00, cached_input_per_million=1.50, cache_write_per_million=18.75
+    ),
+    "claude-haiku-4": ModelPrice(
+        1.00, 5.00, cached_input_per_million=0.10, cache_write_per_million=1.25
+    ),
     # Google Gemini
     "gemini-2.0-flash": ModelPrice(0.10, 0.40, cached_input_per_million=0.025),
     "gemini-2.5-flash": ModelPrice(0.15, 0.60, cached_input_per_million=0.0375),
@@ -122,11 +153,13 @@ def load_pricing_file(path: str | Path) -> dict[str, ModelPrice]:
                 "'input_per_million' and 'output_per_million'."
             )
         cached = entry.get("cached_input_per_million")
+        cache_write = entry.get("cache_write_per_million")
         try:
             table[str(model_name).lower().strip()] = ModelPrice(
                 input_per_million=float(raw_in),
                 output_per_million=float(raw_out),
                 cached_input_per_million=float(cached) if cached is not None else None,
+                cache_write_per_million=float(cache_write) if cache_write is not None else None,
             )
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Invalid numeric price for {model_name!r}: {exc}") from exc
@@ -160,17 +193,12 @@ def _load_env_pricing_cached(env_file: str) -> dict[str, ModelPrice]:
     return loaded
 
 
-def estimate_cost_usd(
+def _resolve_model_price(
     model: str | None,
-    input_tokens: int,
-    output_tokens: int,
     custom_pricing: dict[str, ModelPrice] | None = None,
-    *,
-    cached_input_tokens: int = 0,
-) -> float:
-    """Estimate USD cost for a model call using exact or boundary-safe longest-prefix match."""
-    if not model or (input_tokens == 0 and output_tokens == 0):
-        return 0.0
+) -> ModelPrice | None:
+    if not model:
+        return None
 
     env_file = os.environ.get(PRICING_FILE_ENV)
     env_table = _load_env_pricing_cached(env_file) if env_file else {}
@@ -184,24 +212,15 @@ def estimate_cost_usd(
         table = DEFAULT_PRICING
 
     raw_normalized = model.lower().strip()
-    # Check exact or boundary-safe match BEFORE stripping provider prefixes so custom
-    # keys like "openai/gpt-4o-mini" or "us.anthropic.claude-3-5-sonnet" still match!
     if raw_normalized in table:
-        return table[raw_normalized].compute(
-            input_tokens, output_tokens, cached_input_tokens=cached_input_tokens
-        )
+        return table[raw_normalized]
     raw_matches = [key for key in table if _matches_model_prefix(raw_normalized, key)]
     if raw_matches:
-        best = max(raw_matches, key=len)
-        return table[best].compute(
-            input_tokens, output_tokens, cached_input_tokens=cached_input_tokens
-        )
+        return table[max(raw_matches, key=len)]
 
     normalized = raw_normalized
     if normalized.startswith("models/"):
         normalized = normalized[len("models/") :]
-    # Strip provider prefixes used by OpenRouter / Bedrock (e.g. "openai/gpt-4o-mini",
-    # "anthropic.claude-3-5-sonnet-20241022-v2:0")
     if "/" in normalized:
         normalized = normalized.rsplit("/", 1)[-1]
     for prefix in ("anthropic.", "us.anthropic.", "eu.anthropic.", "apac.anthropic."):
@@ -210,17 +229,32 @@ def estimate_cost_usd(
             break
 
     if normalized in table:
-        return table[normalized].compute(
-            input_tokens, output_tokens, cached_input_tokens=cached_input_tokens
-        )
+        return table[normalized]
 
-    # Longest boundary-safe prefix match (e.g., "gpt-4o-mini-2024-07-18" -> "gpt-4o-mini",
-    # while preventing "gpt-4" from matching "gpt-4o").
     matches = [key for key in table if _matches_model_prefix(normalized, key)]
     if matches:
-        best = max(matches, key=len)
-        return table[best].compute(
-            input_tokens, output_tokens, cached_input_tokens=cached_input_tokens
-        )
+        return table[max(matches, key=len)]
+    return None
 
-    return 0.0
+
+def estimate_cost_usd(
+    model: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    custom_pricing: dict[str, ModelPrice] | None = None,
+    *,
+    cached_input_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+) -> float:
+    """Estimate USD cost for a model call using exact or boundary-safe longest-prefix match."""
+    if not model or (input_tokens == 0 and output_tokens == 0):
+        return 0.0
+    price = _resolve_model_price(model, custom_pricing)
+    if price is None:
+        return 0.0
+    return price.compute(
+        input_tokens,
+        output_tokens,
+        cached_input_tokens=cached_input_tokens,
+        cache_creation_tokens=cache_creation_tokens,
+    )
