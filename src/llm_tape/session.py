@@ -439,6 +439,7 @@ class TapeSession:
         on_record: Callable[[Interaction], Interaction | None] | None = None,
         metadata: dict[str, Any] | None = None,
         max_interactions: int | None = None,
+        max_cost_usd: float | None = None,
         replay_latency_scale: float = 0.0,
         allow_playback_repeats: bool = False,
         save_on_error: bool = False,
@@ -451,6 +452,8 @@ class TapeSession:
             raise ValueError("replay_latency_scale must be a finite number >= 0.0")
         if max_interactions is not None and max_interactions < 0:
             raise ValueError("max_interactions must be >= 0")
+        if max_cost_usd is not None and (not math.isfinite(max_cost_usd) or max_cost_usd < 0.0):
+            raise ValueError("max_cost_usd must be a finite number >= 0.0")
         self.cassette_path = Path(cassette_path)
         self.mode = TapeMode.coerce(mode)
         self.custom_pricing = custom_pricing
@@ -482,6 +485,7 @@ class TapeSession:
         self.on_record = on_record
         self.metadata: dict[str, Any] = dict(metadata) if metadata else {}
         self.max_interactions = max_interactions
+        self.max_cost_usd = float(max_cost_usd) if max_cost_usd is not None else None
         self.replay_latency_scale = float(replay_latency_scale)
         self.allow_playback_repeats = allow_playback_repeats
         self.save_on_error = save_on_error
@@ -865,13 +869,22 @@ class TapeSession:
         return interaction
 
     def _check_recording_guardrails(self) -> None:
-        if self.max_interactions is not None:
+        if self.max_interactions is not None or self.max_cost_usd is not None:
             with self._lock:
                 recorded_count = len(self._recorded)
-            if recorded_count >= self.max_interactions:
+                recorded_cost = sum(i.llm.estimated_cost_usd for i in self._recorded)
+            if self.max_interactions is not None and recorded_count >= self.max_interactions:
                 raise TapeAssertionError(
                     f"Live recording guardrail tripped: reached max_interactions="
                     f"{self.max_interactions}."
+                )
+            if self.max_cost_usd is not None and (
+                (self.max_cost_usd == 0.0 and recorded_count > 0)
+                or (recorded_cost > 0.0 and round(recorded_cost, 8) >= self.max_cost_usd)
+            ):
+                raise TapeAssertionError(
+                    f"Live cost circuit-breaker tripped: recorded ${recorded_cost:.6f} "
+                    f"(limit: max_cost_usd=${self.max_cost_usd:.6f})."
                 )
 
     def _match_replay_or_none(self, recorded_req: RecordedRequest) -> Interaction | None:
@@ -1059,6 +1072,16 @@ class TapeSession:
         with self._lock:
             self._interactions.append(interaction)
             self._recorded.append(interaction)
+            recorded_cost = (
+                sum(i.llm.estimated_cost_usd for i in self._recorded)
+                if self.max_cost_usd is not None
+                else 0.0
+            )
+        if self.max_cost_usd is not None and round(recorded_cost, 8) > self.max_cost_usd:
+            raise TapeAssertionError(
+                f"Live cost circuit-breaker tripped: recorded ${recorded_cost:.6f} "
+                f"(limit: max_cost_usd=${self.max_cost_usd:.6f})."
+            )
         return interaction
 
     def _record_interaction(
@@ -1655,6 +1678,7 @@ def tape(
     on_record: Callable[[Interaction], Interaction | None] | None = None,
     metadata: dict[str, Any] | None = None,
     max_interactions: int | None = None,
+    max_cost_usd: float | None = None,
     replay_latency_scale: float = 0.0,
     allow_playback_repeats: bool = False,
     save_on_error: bool = False,
@@ -1688,6 +1712,7 @@ def tape(
         on_record=on_record,
         metadata=metadata,
         max_interactions=max_interactions,
+        max_cost_usd=max_cost_usd,
         replay_latency_scale=replay_latency_scale,
         allow_playback_repeats=allow_playback_repeats,
         save_on_error=save_on_error,
