@@ -2,33 +2,33 @@
 
 Lightweight **record, replay, and assertion** library for testing LLM-powered Python apps in `pytest` — zero API cost in CI, automatic secret scrubbing, **true sync & async SSE streaming**, and built-in assertions for **token budgets, USD cost, and tool-calling sequences**.
 
-Works transparently with any SDK built on `httpx` (`openai`, `anthropic`, `google-genai`, or raw `httpx.Client` / `httpx.AsyncClient`), plus optional zero-dependency adapters for `requests` (`pip install "llm-tape[requests]"`) and `aiohttp` (`pip install "llm-tape[aiohttp]"`) without modifying your application code.
+Works transparently with any SDK built on `httpx` (`openai`, `anthropic`, `google-genai`, or raw `httpx.Client` / `httpx.AsyncClient`), optional zero-dependency adapters for `requests` (`pip install "llm-tape[requests]"`) and `aiohttp` (`pip install "llm-tape[aiohttp]"`), and opt-in stdlib `urllib.request` (`patch_urllib=True`) without modifying your application code.
 
 ## Features
 
-- **Record & Replay (`once`, `replay`, `record`, `none`):** Record real LLM HTTP & SSE streaming calls once into human-readable `.tape.json` or deterministic gzip-compressed `.tape.json.gz` files (schema v2 with atomic writes and bounded decompression safety), then replay offline deterministically in milliseconds.
-- **True SSE Streaming (Sync & Async):** Incrementally decodes UTF-8 across TCP chunk boundaries, supports `gzip`/`deflate`/`br`/`zstd` streams, only commits completed streams (aborted streams are ignored), and replays chunk-by-chunk via `iter_lines()` / `aiter_text()`.
-- **Concurrency & Nesting Safe:** Uses a `contextvars.ContextVar` + reference-counted `httpx`, optional `requests`, and optional `aiohttp` dispatchers — safe for nested `with tape(...)` blocks, multi-threaded workloads, concurrent `asyncio.gather(...)` tasks, and `pytest-xdist`.
+- **Record & Replay (`once`, `replay`, `record`, `new_episodes`, `none`):** Record real LLM HTTP & SSE streaming calls once into human-readable `.tape.json` or deterministic gzip-compressed `.tape.json.gz` files (schema v2 with atomic writes, `content_hash()`, and bounded decompression safety), append only newly added calls with `new_episodes`, or replay offline deterministically in milliseconds.
+- **Chaos & Fault Injection Replay:** Simulate transient 429 rate-limits, 503 errors, or mutated LLM outputs on replay via `on_replay` + `replace_response()` without editing cassette files.
+- **True WHATWG SSE Streaming (Sync & Async):** Incrementally decodes UTF-8 across TCP chunk boundaries, handles BOM/CRLF/comments/multi-line `data:` per WHATWG SSE spec, supports `gzip`/`deflate`/`br`/`zstd` streams, only commits completed streams, and replays chunk-by-chunk via `iter_lines()` / `aiter_text()`.
+- **Concurrency & Nesting Safe:** Uses a `contextvars.ContextVar` + reference-counted `httpx`, `requests`, `aiohttp`, and `urllib` dispatchers — safe for nested `with tape(...)` blocks, multi-threaded workloads, concurrent `asyncio.gather(...)` tasks, and `pytest-xdist`.
 - **Automatic Secret & PII Scrubbing:** Redacts `Authorization`, `x-api-key`, `x-goog-api-key`, `ocp-apim-subscription-key`, `x-amz-security-token`, cookies, URL basic-auth userinfo, `?key=` query parameters, plus body `redact_fields`, pre-compiled `redact_patterns` (regex on JSON & cross-chunk SSE streams), and custom `scrub_body` hooks.
-- **Flexible Filtering, Matching & Latency Replay:** Ignore non-LLM traffic (`ignore_localhost`, `ignore_hosts`, `ignore_request`), ignore volatile JSON fields (`ignore_fields=["metadata.trace_id", "messages.*.id"]`) and query params (`ignore_query_params`), customize `match_on` or `custom_matcher`, simulate timing with `replay_latency_scale`, and get a clean unified diff on `UnmatchedRequestError`.
-- **LLM-Aware Parsing, Thinking/Reasoning Tokens & Cached Pricing:** Automatically extracts provider, model, token usage (including OpenAI/Anthropic/Gemini/Bedrock cached input tokens and OpenAI/Gemini `reasoning_tokens`), extended `thinking` blocks (Anthropic, DeepSeek-R1, Gemini), estimated USD cost (including `o3`, `o4-mini`, `gpt-4.1`, `claude-4`, `gemini-2.5-*`, `deepseek-*`, `mistral-*`, overrideable via `custom_pricing` or `LLM_TAPE_PRICING_FILE`), response text, and tool calls for:
-  - **OpenAI / Azure OpenAI / OpenRouter** (Chat Completions & Responses API, JSON & SSE)
-  - **Anthropic** (Messages API, JSON & SSE)
+- **Flexible Filtering, Selective Header Matching & Latency Replay:** Ignore non-LLM traffic (`ignore_localhost`, `ignore_hosts`, `ignore_request`), ignore volatile JSON fields (`ignore_fields`) and query params (`ignore_query_params`), match on specific headers (`match_headers=["anthropic-beta"]`), customize `match_on` or `custom_matcher`, simulate timing with `replay_latency_scale`, and get a clean unified diff on `UnmatchedRequestError`.
+- **LLM-Aware Parsing, Thinking/Reasoning Tokens & Cached Pricing:** Automatically extracts provider, model, token usage (including cached input tokens and OpenAI/Gemini `reasoning_tokens`), extended `thinking` blocks (Anthropic, DeepSeek-R1, Gemini), estimated USD cost (overrideable via `custom_pricing` or mtime-cached `LLM_TAPE_PRICING_FILE`), response text, and tool calls for:
+  - **OpenAI / Azure OpenAI / OpenRouter / DeepSeek / Groq / Mistral** (Chat Completions, Responses API & Embeddings, JSON & SSE)
+  - **Anthropic** (Messages API + Extended Thinking, JSON & SSE)
   - **Google Gemini / Vertex AI** (`:generateContent` & `:streamGenerateContent`, JSON & SSE)
+  - **Cohere** (`/v2/chat` & `/v1/chat`, JSON & SSE)
   - **Ollama** (`/api/chat`, `/api/generate`, JSON & NDJSON streaming)
   - **AWS Bedrock** (Converse API)
-- **Built-in Assertions:**
-  - `session.assert_cost_under(0.01)`
-  - `session.assert_tokens_under(2000)`
-  - `session.assert_cached_tokens_at_least(500)`
+- **Built-in Assertions & Telemetry:**
+  - `session.assert_cost_under(0.01)` / `session.assert_tokens_under(2000)` / `session.assert_reasoning_tokens_under(500)`
+  - `session.assert_cached_tokens_at_least(500)` / `session.assert_thinking_present()`
+  - `session.assert_text_contains("42")` / `session.assert_text_matches(r"\b\d+\b")`
   - `session.assert_model("gpt-4o-mini")` / `session.assert_provider("openai")`
-  - `session.assert_tool_called("search_docs", min_times=1)`
-  - `session.assert_tool_args("search_docs", {"query": "pytest"})`
-  - `session.assert_tool_sequence(["search_docs", "summarize"])`
-  - `session.assert_call_count(2)` / `session.assert_no_errors()`
-  - `session.assert_no_unused_interactions()`
-  - `session.assert_max_latency_ms(2000.0)`
-- **Pytest Plugin + CI-ready CLI:** Auto-discovered `llm_tape` fixture (`--tape-mode`, `--tape-dir`, `--tape-compress`, `--tape-report`, `--tape-json-report`, `--tape-max-cost`, `--tape-max-tokens`, `@pytest.mark.tape(...)`, `pyproject.toml` ini defaults, `pytest-xdist`-safe) and `llm-tape inspect | summary | verify | diff | redact | prune` CLI with `--json` and CI regression/secret gates.
+  - `session.assert_tool_called("search_docs", min_times=1)` / `session.assert_no_tool_called("delete_db")`
+  - `session.assert_tool_args("search_docs", {"query": "pytest"})` / `session.assert_tool_sequence(["search_docs", "summarize"])`
+  - `session.assert_call_count(2)` / `session.assert_no_errors()` / `session.assert_no_unused_interactions()` / `session.assert_max_latency_ms(2000.0)`
+  - `session.export_summary()`, `session.last_text`, `session.last_thinking`, `session.all_texts`
+- **Pytest Plugin + CI-ready CLI:** Auto-discovered `llm_tape` fixture (`--tape-mode`, `--tape-dir`, `--tape-compress`, `--tape-report`, `--tape-json-report`, `--tape-max-cost`, `--tape-max-tokens`, `--tape-strict-unused`, `@pytest.mark.tape(...)`, `pyproject.toml` ini defaults, `pytest-xdist`-safe) and `llm-tape inspect | summary | stats | verify | diff | redact | prune | export | convert | schema` CLI + `.pre-commit-hooks.yaml`.
 
 ## Installation
 
@@ -131,6 +131,11 @@ llm-tape export tests/tapes --format har -o trace.har
 
 # Bulk convert cassettes between plain .tape.json and gzip .tape.json.gz
 llm-tape convert tests/tapes --to gzip --delete-source
+
+# Provider/model analytics (cache hit %, avg/p95 latency, cost) & JSON Schema export
+llm-tape stats tests/tapes
+llm-tape inspect tests/tapes/test_agent/agent_search.tape.json --show-bodies --show-thinking --interaction 1
+llm-tape schema -o cassette.schema.json
 ```
 
 Run pytest with terminal cost summary & JSON report for CI:
