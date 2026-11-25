@@ -38,7 +38,11 @@ def test_new_episodes_records_fresh_then_replays_and_appends_only_new(tmp_path: 
     assert live_calls == ["one"]
     assert len(Cassette.load(tape_path).interactions) == 1
 
-    # 2. Second run replays step 1 offline AND records new step 2, appending it
+    # 2. Add custom metadata, then second run replays step 1 offline AND appends step 2
+    c_meta = Cassette.load(tape_path)
+    c_meta.metadata["custom_tag"] = "keep-me"
+    c_meta.save()
+
     with tape(tape_path, mode="new_episodes", patch_httpx=False) as s2:
         with httpx.Client(transport=TapeTransport(s2, upstream=upstream)) as c:
             r1 = c.post("https://api.openai.com/v1/chat/completions", json={"step": "one"})
@@ -47,7 +51,9 @@ def test_new_episodes_records_fresh_then_replays_and_appends_only_new(tmp_path: 
             assert r2.json()["choices"][0]["message"]["content"] == "reply-two"
         s2.assert_call_count(2)
     assert live_calls == ["one", "two"]  # step "one" was NOT sent live!
-    assert len(Cassette.load(tape_path).interactions) == 2
+    updated_cassette = Cassette.load(tape_path)
+    assert len(updated_cassette.interactions) == 2
+    assert updated_cassette.metadata["custom_tag"] == "keep-me"
 
     # 3. Third run replays both completely offline and does NOT rewrite the file
     mtime_before = tape_path.stat().st_mtime_ns

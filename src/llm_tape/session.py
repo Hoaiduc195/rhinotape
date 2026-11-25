@@ -472,6 +472,7 @@ class TapeSession:
         self._interactions: list[Interaction] = []
         self._recorded: list[Interaction] = []
         self._existing_interactions: list[Interaction] = []
+        self._existing_metadata: dict[str, Any] = {}
         self._replay_queues: dict[str, deque[tuple[int, Interaction]]] = defaultdict(deque)
         self._custom_replay_list: list[tuple[int, Interaction]] = []
         self._total_loaded_count = 0
@@ -499,6 +500,7 @@ class TapeSession:
                 self._interactions.clear()
                 self._recorded.clear()
                 self._existing_interactions.clear()
+                self._existing_metadata.clear()
                 self._replay_queues.clear()
                 self._custom_replay_list.clear()
                 self._total_loaded_count = 0
@@ -534,6 +536,7 @@ class TapeSession:
                     cassette = Cassette.load(self.cassette_path)
                     self._load_replay_queues(cassette)
                     self._existing_interactions = list(cassette.interactions)
+                    self._existing_metadata = dict(cassette.metadata)
                     self._is_replaying = True
                     self._is_recording = True
                 else:
@@ -625,6 +628,7 @@ class TapeSession:
         with self._lock:
             recorded_copy = list(self._recorded)
             existing_copy = list(self._existing_interactions)
+            existing_meta_copy = dict(self._existing_metadata)
         should_save = bool(recorded_copy) or (self.mode is TapeMode.RECORD and not exc_occurred)
         if should_save:
             combined = (
@@ -632,10 +636,15 @@ class TapeSession:
                 if self.mode is TapeMode.NEW_EPISODES
                 else recorded_copy
             )
+            merged_meta = (
+                {**existing_meta_copy, "llm_tape_version": __version__}
+                if self.mode is TapeMode.NEW_EPISODES
+                else {"llm_tape_version": __version__}
+            )
             cassette = Cassette(
                 path=self.cassette_path,
                 interactions=combined,
-                metadata={"llm_tape_version": __version__},
+                metadata=merged_meta,
             )
             cassette.save()
 
