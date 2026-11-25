@@ -155,6 +155,28 @@ class _ReplayAiohttpStreamReader:
                 break
             yield chunk
 
+    async def readany(self) -> bytes:
+        if self._buf:
+            out = bytes(self._buf)
+            self._buf.clear()
+            return out
+        if not await self._fill_next():
+            return b""
+        out = bytes(self._buf)
+        self._buf.clear()
+        return out
+
+    async def readchunk(self) -> tuple[bytes, bool]:
+        chunk = await self.readany()
+        return (chunk, bool(chunk))
+
+    async def iter_chunks(self) -> AsyncIterator[tuple[bytes, bool]]:
+        while True:
+            chunk, end_of_chunk = await self.readchunk()
+            if not chunk:
+                break
+            yield (chunk, end_of_chunk)
+
     def __aiter__(self) -> AsyncIterator[bytes]:
         return self._iter_lines()
 
@@ -177,6 +199,7 @@ class _ReplayAiohttpResponse:
         interaction: Interaction,
         chunk_delay_s: float = 0.0,
     ) -> None:
+        aiohttp_mod: Any = importlib.import_module("aiohttp")
         multidict_mod: Any = importlib.import_module("multidict")
         yarl_mod: Any = importlib.import_module("yarl")
 
@@ -191,6 +214,12 @@ class _ReplayAiohttpResponse:
             if k.lower() not in _STRIP_REPLAY_HEADERS
         }
         self.headers = multidict_mod.CIMultiDictProxy(multidict_mod.CIMultiDict(replay_headers))
+        self.request_info = aiohttp_mod.RequestInfo(
+            url=self.url,
+            method=self.method,
+            headers=self.headers,
+            real_url=self.url,
+        )
         raw_ct = self.headers.get("Content-Type", "application/octet-stream")
         self.content_type = raw_ct.split(";", 1)[0].strip().lower()
         self.charset = "utf-8"
@@ -206,6 +235,10 @@ class _ReplayAiohttpResponse:
 
         self.content = _ReplayAiohttpStreamReader(chunks, chunk_delay_s=chunk_delay_s)
         self._body: bytes | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status < 400
 
     async def read(self) -> bytes:
         if self._body is None:
@@ -223,14 +256,25 @@ class _ReplayAiohttpResponse:
         loads: Callable[[str], Any] = json.loads,
         content_type: str | None = "application/json",
     ) -> Any:
-        del content_type
+        if content_type is not None:
+            ct_lower = content_type.lower()
+            if self.content_type != ct_lower and not (
+                ct_lower == "application/json" and self.content_type.endswith("+json")
+            ):
+                aiohttp_mod: Any = importlib.import_module("aiohttp")
+                raise aiohttp_mod.ContentTypeError(
+                    self.request_info,
+                    history=(),
+                    message=f"Attempt to decode JSON with unexpected mimetype: {self.content_type}",
+                    headers=self.headers,
+                )
         return loads(await self.text(encoding=encoding))
 
     def raise_for_status(self) -> None:
         if self.status >= 400:
             aiohttp_mod: Any = importlib.import_module("aiohttp")
             raise aiohttp_mod.ClientResponseError(
-                request_info=None,
+                request_info=self.request_info,
                 history=(),
                 status=self.status,
                 message=self.reason,
@@ -314,6 +358,28 @@ class _RecordingAiohttpStreamReader:
             yield chunk
         self._finish()
 
+    async def readany(self) -> bytes:
+        data: bytes = await self._upstream.readany()
+        if data:
+            self._record_bytes(data)
+        else:
+            self._finish()
+        return data
+
+    async def readchunk(self) -> tuple[bytes, bool]:
+        chunk, end_of_chunk = await self._upstream.readchunk()
+        if chunk:
+            self._record_bytes(chunk)
+        else:
+            self._finish()
+        return (chunk, end_of_chunk)
+
+    async def iter_chunks(self) -> AsyncIterator[tuple[bytes, bool]]:
+        async for chunk, end_of_chunk in self._upstream.iter_chunks():
+            self._record_bytes(chunk)
+            yield (chunk, end_of_chunk)
+        self._finish()
+
     def __aiter__(self) -> AsyncIterator[bytes]:
         return self._iter_lines()
 
@@ -378,12 +444,20 @@ async def _dispatched_aiohttp_request(
                 chunk_delay_s = delay_s / len(interaction.response.stream_chunks)
             else:
                 await asyncio.sleep(delay_s)
-        return _ReplayAiohttpResponse(
+        replay_resp = _ReplayAiohttpResponse(
             method=method.upper(),
             url=url,
             interaction=interaction,
             chunk_delay_s=chunk_delay_s,
         )
+        rfs = kwargs.get("raise_for_status")
+        if rfs is None:
+            rfs = getattr(client_session, "_raise_for_status", False)
+        if callable(rfs):
+            await rfs(replay_resp)
+        elif rfs:
+            replay_resp.raise_for_status()
+        return replay_resp
 
     start = time.perf_counter()
     token = _in_aiohttp_request.set(True)

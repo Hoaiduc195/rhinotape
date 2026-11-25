@@ -210,3 +210,54 @@ async def test_aiohttp_stream_reader_helpers_and_missing_import(
     monkeypatch.setattr(importlib, "import_module", fake_import)
     assert acquire_aiohttp_patch(lambda: None) is False
     release_aiohttp_patch()
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_rv_review_regressions(tmp_path: Path) -> None:
+    runner, base_url, _hits = await _start_local_server()
+    try:
+        # P1 #1 & P2 #3: raise_for_status + RequestInfo formatting + .ok + .json content_type
+        err_tape = tmp_path / "err_rfs.tape.json"
+        async with tape(err_tape, mode=TapeMode.RECORD):
+            async with aiohttp.ClientSession(base_url=base_url) as client:
+                async with client.get("/v1/error") as r:
+                    assert r.status == 429
+
+        async with tape(err_tape, mode=TapeMode.REPLAY, allow_playback_repeats=True):
+            async with aiohttp.ClientSession(base_url=base_url, raise_for_status=True) as client:
+                with pytest.raises(aiohttp.ClientResponseError) as exc_info:
+                    async with client.get("/v1/error"):
+                        pass
+                # str(exc) must format cleanly without AttributeError
+                assert "429" in str(exc_info.value)
+
+            async with aiohttp.ClientSession(base_url=base_url) as client:
+                async with client.get("/v1/error") as r2:
+                    assert r2.ok is False
+                    with pytest.raises(aiohttp.ContentTypeError):
+                        await r2.json(content_type="text/plain")
+                    # content_type=None skips check
+                    assert (await r2.json(content_type=None))["error"] == "rate_limit"
+
+        # P1 #2: readany(), readchunk(), iter_chunks() record & replay SSE properly
+        sse_tape = tmp_path / "sse_chunks.tape.json"
+        async with tape(sse_tape, mode=TapeMode.RECORD) as rec:
+            async with aiohttp.ClientSession(base_url=base_url) as client:
+                async with client.post("/v1/chat/sse", json={"stream": True}) as r:
+                    assert r.ok is True
+                    got = b"".join([c async for c, _ in r.content.iter_chunks()])
+                    assert b"Hi " in got and b"aio!" in got
+            rec.assert_call_count(1)
+            assert rec.interactions[0].llm.text == "Hi aio!"
+
+        async with tape(sse_tape, mode=TapeMode.REPLAY, allow_playback_repeats=True):
+            async with aiohttp.ClientSession(base_url=base_url) as client:
+                async with client.post("/v1/chat/sse", json={"stream": True}) as r:
+                    assert r.ok is True
+                    got2 = b"".join([c async for c, _ in r.content.iter_chunks()])
+                    assert got2 == got
+                async with client.post("/v1/chat/sse", json={"stream": True}) as r2:
+                    first = await r2.content.readany()
+                    assert first
+    finally:
+        await runner.cleanup()
