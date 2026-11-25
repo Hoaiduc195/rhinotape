@@ -17,7 +17,20 @@ from llm_tape.models import (
     Usage,
 )
 from llm_tape.pricing import DEFAULT_PRICING, ModelPrice, estimate_cost_usd, load_pricing_file
-from llm_tape.scrubbing import DEFAULT_MATCH_ON, VALID_MATCH_ON, redact_body, redact_text
+from llm_tape.scrubbing import (
+    DEFAULT_MATCH_ON,
+    PII_CREDIT_CARD,
+    PII_EMAIL,
+    PII_IPV4,
+    PII_JWT,
+    PII_PHONE,
+    PII_PRESETS,
+    PII_SSN,
+    VALID_MATCH_ON,
+    redact_body,
+    redact_text,
+    resolve_pii_patterns,
+)
 from llm_tape.server import TapeReplayServer
 from llm_tape.session import TapeSession, replace_response, tape, use_tape
 from llm_tape.transport import AsyncTapeTransport, TapeTransport
@@ -31,6 +44,13 @@ __all__ = [
     "Interaction",
     "LLMCallSummary",
     "ModelPrice",
+    "PII_CREDIT_CARD",
+    "PII_EMAIL",
+    "PII_IPV4",
+    "PII_JWT",
+    "PII_PHONE",
+    "PII_PRESETS",
+    "PII_SSN",
     "RecordedRequest",
     "RecordedResponse",
     "TapeAssertionError",
@@ -50,6 +70,7 @@ __all__ = [
     "redact_body",
     "redact_text",
     "replace_response",
+    "resolve_pii_patterns",
     "tape",
     "use_tape",
 ]

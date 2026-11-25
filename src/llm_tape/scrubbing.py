@@ -49,6 +49,52 @@ DEFAULT_SENSITIVE_QUERY_PARAMS: frozenset[str] = frozenset(
     }
 )
 
+PII_EMAIL: re.Pattern[str] = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+PII_PHONE: re.Pattern[str] = re.compile(
+    r"(?<!\d)(?:\+?1[-.\s]?)?(?:\(\d{3}\)|\d{3})[-.\s]\d{3}[-.\s]\d{4}(?!\d)"
+)
+PII_SSN: re.Pattern[str] = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")
+PII_CREDIT_CARD: re.Pattern[str] = re.compile(r"(?<!\d)(?:\d{4}[-\s]?){3}\d{4}(?!\d)")
+PII_IPV4: re.Pattern[str] = re.compile(
+    r"(?<!\d)(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?!\d)"
+)
+PII_JWT: re.Pattern[str] = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+)
+
+PII_PRESETS: dict[str, re.Pattern[str]] = {
+    "email": PII_EMAIL,
+    "phone": PII_PHONE,
+    "ssn": PII_SSN,
+    "credit_card": PII_CREDIT_CARD,
+    "ipv4": PII_IPV4,
+    "jwt": PII_JWT,
+}
+
+
+def resolve_pii_patterns(redact_pii: bool | str | Iterable[str]) -> tuple[re.Pattern[str], ...]:
+    """Resolve `redact_pii` flag or preset names into compiled regex patterns."""
+    if redact_pii is False or redact_pii is None:
+        return ()
+    if redact_pii is True:
+        return tuple(PII_PRESETS.values())
+    names = [redact_pii] if isinstance(redact_pii, str) else list(redact_pii)
+    resolved: list[re.Pattern[str]] = []
+    seen: set[str] = set()
+    for raw in names:
+        key = raw.strip().lower()
+        if not key:
+            continue
+        if key == "all":
+            return tuple(PII_PRESETS.values())
+        if key not in PII_PRESETS:
+            valid = ", ".join(sorted(PII_PRESETS))
+            raise ValueError(f"Unknown PII preset {raw!r}. Expected one of: {valid}, all")
+        if key not in seen:
+            seen.add(key)
+            resolved.append(PII_PRESETS[key])
+    return tuple(resolved)
+
 
 def scrub_headers(
     headers: Mapping[str, str] | Iterable[tuple[str, str]],
