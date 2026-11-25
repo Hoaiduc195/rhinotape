@@ -268,6 +268,11 @@ def redact_body(
     if not fields and not compiled and scrub_body is None:
         return body
 
+    # _redact_patterns_in_node already constructs fresh dicts/lists, so skip deepcopy when only
+    # regex patterns are active (cuts allocations and tree traversal in half).
+    if not fields and scrub_body is None:
+        return _redact_patterns_in_node(body, compiled)
+
     result = copy.deepcopy(body)
     if fields and isinstance(result, (dict, list)):
         for field_path in fields:
@@ -281,8 +286,10 @@ def redact_body(
 
 def strip_ignored_fields(body: Any, ignore_fields: Iterable[str]) -> Any:
     """Return a deep copy of body with dot-path fields (supporting '*' wildcards) removed."""
+    if not ignore_fields or not isinstance(body, (dict, list)):
+        return body
     fields = [f.strip() for f in ignore_fields if f.strip()]
-    if not fields or not isinstance(body, (dict, list)):
+    if not fields:
         return body
     cloned = copy.deepcopy(body)
     for field_path in fields:

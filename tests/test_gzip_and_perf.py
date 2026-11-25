@@ -229,3 +229,34 @@ def test_gzip_bomb_cap_and_case_insensitive_extensions(
     upper_gz.write_bytes(b"")
     assert iter_cassette_files(upper_dir) == [upper_gz]
     assert _cassette_stem(upper_gz) == "test_case"
+
+
+def test_pricing_file_cache_and_pattern_only_redaction_preserves_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import llm_tape.pricing as pricing_mod
+    from llm_tape import estimate_cost_usd, redact_body
+
+    pfile = tmp_path / "prices.json"
+    pfile.write_text(
+        json.dumps({"cached-model": {"input_per_million": 2.0, "output_per_million": 4.0}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LLM_TAPE_PRICING_FILE", str(pfile))
+    calls = {"n": 0}
+    orig_loader = pricing_mod.load_pricing_file
+
+    def counting_loader(path: str | Path) -> dict[str, pricing_mod.ModelPrice]:
+        calls["n"] += 1
+        return orig_loader(path)
+
+    monkeypatch.setattr(pricing_mod, "load_pricing_file", counting_loader)
+    assert estimate_cost_usd("cached-model", 1_000_000, 0) == pytest.approx(2.0)
+    assert estimate_cost_usd("cached-model", 1_000_000, 0) == pytest.approx(2.0)
+    assert calls["n"] == 1  # second call served from mtime/size cache!
+
+    # Pattern-only redact_body does not mutate original input dict
+    orig = {"nested": {"secret": "tok-12345"}}
+    redacted = redact_body(orig, redact_patterns=[r"tok-\d+"])
+    assert redacted == {"nested": {"secret": "[REDACTED]"}}
+    assert orig == {"nested": {"secret": "tok-12345"}}

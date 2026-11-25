@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 _BOUNDARY_CHARS = frozenset({"-", ".", ":", "@"})
 PRICING_FILE_ENV = "LLM_TAPE_PRICING_FILE"
+_pricing_cache_lock = threading.Lock()
+_pricing_file_cache: dict[str, tuple[int, int, dict[str, ModelPrice]]] = {}
 
 
 @dataclass(frozen=True)
@@ -124,6 +127,27 @@ def _matches_model_prefix(normalized: str, key: str) -> bool:
     return normalized.startswith(key) and normalized[len(key)] in _BOUNDARY_CHARS
 
 
+def _load_env_pricing_cached(env_file: str) -> dict[str, ModelPrice]:
+    path = Path(env_file)
+    try:
+        st = path.stat()
+    except OSError:
+        return {}
+    if not path.is_file():
+        return {}
+    with _pricing_cache_lock:
+        cached = _pricing_file_cache.get(env_file)
+        if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+            return cached[2]
+    try:
+        loaded = load_pricing_file(path)
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    with _pricing_cache_lock:
+        _pricing_file_cache[env_file] = (st.st_mtime_ns, st.st_size, loaded)
+    return loaded
+
+
 def estimate_cost_usd(
     model: str | None,
     input_tokens: int,
@@ -136,15 +160,16 @@ def estimate_cost_usd(
     if not model or (input_tokens == 0 and output_tokens == 0):
         return 0.0
 
-    table: dict[str, ModelPrice] = dict(DEFAULT_PRICING)
     env_file = os.environ.get(PRICING_FILE_ENV)
-    if env_file and Path(env_file).is_file():
-        try:
-            table.update(load_pricing_file(env_file))
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
-    if custom_pricing:
-        table.update({k.lower().strip(): v for k, v in custom_pricing.items()})
+    env_table = _load_env_pricing_cached(env_file) if env_file else {}
+    if env_table or custom_pricing:
+        table: dict[str, ModelPrice] = dict(DEFAULT_PRICING)
+        if env_table:
+            table.update(env_table)
+        if custom_pricing:
+            table.update({k.lower().strip(): v for k, v in custom_pricing.items()})
+    else:
+        table = DEFAULT_PRICING
 
     raw_normalized = model.lower().strip()
     # Check exact or boundary-safe match BEFORE stripping provider prefixes so custom
