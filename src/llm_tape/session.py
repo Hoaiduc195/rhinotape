@@ -428,6 +428,7 @@ class TapeSession:
         redact_patterns: Iterable[str | re.Pattern[str]] = (),
         scrub_body: Callable[[Any], Any] | None = None,
         match_on: Iterable[str] = DEFAULT_MATCH_ON,
+        match_headers: Iterable[str] = (),
         custom_matcher: Callable[[RecordedRequest, RecordedRequest], bool] | None = None,
         on_replay: Callable[[Interaction, int], Interaction | None] | None = None,
         replay_latency_scale: float = 0.0,
@@ -458,6 +459,7 @@ class TapeSession:
         )
         self.scrub_body = scrub_body
         self.match_on = validate_match_on(match_on)
+        self.match_headers = tuple(h.lower().strip() for h in match_headers if h.strip())
         self.custom_matcher = custom_matcher
         self.on_replay = on_replay
         self.replay_latency_scale = float(replay_latency_scale)
@@ -558,6 +560,7 @@ class TapeSession:
                     ignore_fields=self.ignore_fields,
                     ignore_query_params=self.ignore_query_params,
                     match_on=self.match_on,
+                    match_headers=self.match_headers,
                 )
                 self._replay_queues[fp].append((idx, interaction))
                 self._custom_replay_list.append((idx, interaction))
@@ -718,6 +721,7 @@ class TapeSession:
             ignore_fields=self.ignore_fields,
             ignore_query_params=self.ignore_query_params,
             match_on=self.match_on,
+            match_headers=self.match_headers,
         )
         return RecordedRequest(
             method=method.upper(),
@@ -1418,6 +1422,7 @@ def tape(
     redact_patterns: Iterable[str | re.Pattern[str]] = (),
     scrub_body: Callable[[Any], Any] | None = None,
     match_on: Iterable[str] = DEFAULT_MATCH_ON,
+    match_headers: Iterable[str] = (),
     custom_matcher: Callable[[RecordedRequest, RecordedRequest], bool] | None = None,
     on_replay: Callable[[Interaction, int], Interaction | None] | None = None,
     replay_latency_scale: float = 0.0,
@@ -1444,6 +1449,7 @@ def tape(
         redact_patterns=redact_patterns,
         scrub_body=scrub_body,
         match_on=match_on,
+        match_headers=match_headers,
         custom_matcher=custom_matcher,
         on_replay=on_replay,
         replay_latency_scale=replay_latency_scale,

@@ -83,6 +83,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,
         help="Fail the pytest session if total LLM tokens exceed this limit.",
     )
+    group.addoption(
+        "--tape-strict-unused",
+        action="store_true",
+        default=False,
+        help="Automatically fail passing replay tests that leave recorded interactions unused.",
+    )
 
     parser.addini(
         "tape_mode",
@@ -123,6 +129,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="List of URL query parameters to ignore during request matching by default.",
         type="linelist",
         default=[],
+    )
+    parser.addini(
+        "tape_strict_unused",
+        help="Automatically assert no unused interactions on replay tests.",
+        type="bool",
+        default=False,
     )
 
 
@@ -376,6 +388,7 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
         redact_patterns=marker_kwargs.get("redact_patterns", ()),
         scrub_body=marker_kwargs.get("scrub_body"),
         match_on=marker_kwargs.get("match_on") or DEFAULT_MATCH_ON,
+        match_headers=marker_kwargs.get("match_headers", ()),
         custom_matcher=marker_kwargs.get("custom_matcher"),
         on_replay=marker_kwargs.get("on_replay"),
         replay_latency_scale=float(marker_kwargs.get("replay_latency_scale", 0.0)),
@@ -390,6 +403,25 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
         yield session
     finally:
         test_failed = bool(getattr(request.node, _FAILED_ATTR, False))
+        strict_unused = (
+            bool(marker_kwargs["strict_unused"])
+            if marker_kwargs.get("strict_unused") is not None
+            else (
+                bool(request.config.getoption("--tape-strict-unused"))
+                or bool(request.config.getini("tape_strict_unused"))
+            )
+        )
+        unused_err: Exception | None = None
+        if (
+            strict_unused
+            and not test_failed
+            and session._is_replaying
+            and not session._is_recording
+        ):
+            try:
+                session.assert_no_unused_interactions()
+            except Exception as exc:
+                unused_err = exc
         if session._is_recording and session._is_replaying:
             action = "updated" if session._recorded else "replayed"
         elif session._is_recording:
@@ -398,7 +430,7 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
             action = "replayed"
         else:
             action = "none"
-        session._finalize(exc_occurred=test_failed)
+        session._finalize(exc_occurred=test_failed or unused_err is not None)
         usage = session.total_usage
         interactions = session.interactions
         entries = request.config.stash.get(_REPORT_KEY, None)
@@ -417,3 +449,5 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
                     "latency_ms": round(sum(i.latency_ms for i in interactions), 2),
                 }
             )
+        if unused_err is not None:
+            raise unused_err

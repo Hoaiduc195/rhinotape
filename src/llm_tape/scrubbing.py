@@ -312,6 +312,7 @@ def fingerprint_request(
     ignore_fields: Iterable[str] = (),
     ignore_query_params: Iterable[str] = (),
     match_on: Sequence[str] = DEFAULT_MATCH_ON,
+    match_headers: Iterable[str] = (),
 ) -> str:
     """Compute a deterministic SHA-256 fingerprint for matching HTTP requests."""
     normalized_url = (
@@ -327,14 +328,16 @@ def fingerprint_request(
     )
 
     keys = validate_match_on(match_on)
-    if keys == DEFAULT_MATCH_ON:
+    header_filter = frozenset(h.lower().strip() for h in match_headers if h.strip())
+    if keys == DEFAULT_MATCH_ON and not header_filter:
         # Preserve exact v0.1/v0.2 fingerprint hash format for full backwards compatibility
         payload = f"{method.upper()}\n{normalized_url}\n{canonical_body}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
+    effective_keys = keys if ("headers" in keys or not header_filter) else (*keys, "headers")
     url_parts = urlsplit(normalized_url)
     pieces: list[str] = []
-    for key in keys:
+    for key in effective_keys:
         if key == "method":
             pieces.append(f"method:{method.upper()}")
         elif key == "url":
@@ -348,7 +351,11 @@ def fingerprint_request(
         elif key == "body":
             pieces.append(f"body:{canonical_body}")
         elif key == "headers":
-            norm_headers = {k.lower(): v for k, v in (headers or {}).items()}
+            norm_headers = {
+                k.lower(): v
+                for k, v in (headers or {}).items()
+                if not header_filter or k.lower() in header_filter
+            }
             pieces.append(
                 "headers:"
                 + json.dumps(
