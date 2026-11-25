@@ -59,3 +59,14 @@ def test_wave19_cassette_filter_slice_and_deduplicate(tmp_path: Path) -> None:
     assert [i.request.fingerprint for i in sliced.interactions] == ["a", "b"]
     deduped = c.deduplicate()
     assert [i.request.fingerprint for i in deduped.interactions] == ["a", "b"]
+
+
+def test_wave20_cli_split(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    src = tmp_path / "multi.tape.json"
+    Cassette(path=src, interactions=[_mk_inter("x"), _mk_inter("y"), _mk_inter("z")]).save()
+    out_dir = tmp_path / "parts"
+    assert cli_main(["split", str(src), "-o", str(out_dir), "--gzip"]) == 0
+    assert "Split" in capsys.readouterr().out
+    parts = sorted(out_dir.glob("*.tape.json.gz"))
+    assert len(parts) == 3
+    assert Cassette.load(parts[1]).interactions[0].request.fingerprint == "y"

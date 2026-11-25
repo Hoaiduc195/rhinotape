@@ -1463,6 +1463,34 @@ def _cmd_merge(
     return 0
 
 
+def _cmd_split(
+    source: Path,
+    *,
+    output_dir: Path,
+    compress: bool = False,
+) -> int:
+    """Split a multi-interaction cassette into individual single-interaction cassettes."""
+    if not source.exists() or not source.is_file():
+        print(f"Error: cassette file not found: {source}", file=sys.stderr)
+        return 1
+    cassette = Cassette.load(source)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem = _cassette_stem(source)
+    ext = ".tape.json.gz" if compress else ".tape.json"
+    width = max(3, len(str(len(cassette.interactions))))
+    for idx, inter in enumerate(cassette.interactions, start=1):
+        out_path = output_dir / f"{stem}_{idx:0{width}d}{ext}"
+        part = Cassette(
+            path=out_path,
+            interactions=[inter],
+            recorded_at=cassette.recorded_at,
+            metadata=dict(cassette.metadata),
+        )
+        part.save()
+    print(f"Split {source} into {len(cassette.interactions)} cassette(s) under {output_dir}.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llm-tape",
@@ -1751,6 +1779,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Drop duplicate interactions sharing the same request fingerprint.",
     )
 
+    p_split = sub.add_parser(
+        "split",
+        help="Split a multi-interaction cassette into one cassette file per interaction.",
+    )
+    p_split.add_argument("source", type=Path, help="Source cassette file to split.")
+    p_split.add_argument(
+        "-o",
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="Output directory for split cassette files.",
+    )
+    p_split.add_argument(
+        "--gzip",
+        action="store_true",
+        dest="compress",
+        help="Write split cassettes as .tape.json.gz.",
+    )
+
     return parser
 
 
@@ -1822,6 +1869,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_schema(output=args.output)
         if args.command == "merge":
             return _cmd_merge(args.sources, output=args.output, deduplicate=args.deduplicate)
+        if args.command == "split":
+            return _cmd_split(args.source, output_dir=args.output_dir, compress=args.compress)
     except (TapeError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
