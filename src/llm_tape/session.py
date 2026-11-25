@@ -471,6 +471,7 @@ class TapeSession:
         self._lock = threading.Lock()
         self._interactions: list[Interaction] = []
         self._recorded: list[Interaction] = []
+        self._existing_interactions: list[Interaction] = []
         self._replay_queues: dict[str, deque[tuple[int, Interaction]]] = defaultdict(deque)
         self._custom_replay_list: list[tuple[int, Interaction]] = []
         self._total_loaded_count = 0
@@ -497,6 +498,7 @@ class TapeSession:
             with self._lock:
                 self._interactions.clear()
                 self._recorded.clear()
+                self._existing_interactions.clear()
                 self._replay_queues.clear()
                 self._custom_replay_list.clear()
                 self._total_loaded_count = 0
@@ -524,6 +526,16 @@ class TapeSession:
                     self._load_replay_queues(cassette)
                     self._is_replaying = True
                     self._is_recording = False
+                else:
+                    self._is_replaying = False
+                    self._is_recording = True
+            elif self.mode is TapeMode.NEW_EPISODES:
+                if self.cassette_path.exists():
+                    cassette = Cassette.load(self.cassette_path)
+                    self._load_replay_queues(cassette)
+                    self._existing_interactions = list(cassette.interactions)
+                    self._is_replaying = True
+                    self._is_recording = True
                 else:
                     self._is_replaying = False
                     self._is_recording = True
@@ -612,11 +624,17 @@ class TapeSession:
             return
         with self._lock:
             recorded_copy = list(self._recorded)
+            existing_copy = list(self._existing_interactions)
         should_save = bool(recorded_copy) or (self.mode is TapeMode.RECORD and not exc_occurred)
         if should_save:
+            combined = (
+                [*existing_copy, *recorded_copy]
+                if self.mode is TapeMode.NEW_EPISODES
+                else recorded_copy
+            )
             cassette = Cassette(
                 path=self.cassette_path,
-                interactions=recorded_copy,
+                interactions=combined,
                 metadata={"llm_tape_version": __version__},
             )
             cassette.save()
@@ -786,6 +804,17 @@ class TapeSession:
             self._interactions.append(interaction)
         return interaction
 
+    def _match_replay_or_none(self, recorded_req: RecordedRequest) -> Interaction | None:
+        """Return matched replay Interaction, None if recording/new_episodes miss, or raise."""
+        if not self._is_replaying:
+            return None
+        if self._is_recording:
+            try:
+                return self._pop_replay_interaction(recorded_req)
+            except UnmatchedRequestError:
+                return None
+        return self._pop_replay_interaction(recorded_req)
+
     def _build_replay_httpx_response(
         self,
         request: httpx.Request,
@@ -825,14 +854,13 @@ class TapeSession:
             request=request,
         )
 
-    def _replay_response(
+    def _replay_interaction_response(
         self,
         request: httpx.Request,
-        recorded_req: RecordedRequest,
+        interaction: Interaction,
         *,
         stream: bool = False,
     ) -> httpx.Response:
-        interaction = self._pop_replay_interaction(recorded_req)
         delay_s = (
             (interaction.latency_ms * self.replay_latency_scale) / 1000.0
             if self.replay_latency_scale > 0.0 and interaction.latency_ms > 0.0
@@ -848,14 +876,13 @@ class TapeSession:
             request, interaction, stream=stream, chunk_delay_s=chunk_delay_s
         )
 
-    async def _replay_response_async(
+    async def _replay_interaction_response_async(
         self,
         request: httpx.Request,
-        recorded_req: RecordedRequest,
+        interaction: Interaction,
         *,
         stream: bool = False,
     ) -> httpx.Response:
-        interaction = self._pop_replay_interaction(recorded_req)
         delay_s = (
             (interaction.latency_ms * self.replay_latency_scale) / 1000.0
             if self.replay_latency_scale > 0.0 and interaction.latency_ms > 0.0
@@ -986,8 +1013,9 @@ class TapeSession:
             body_bytes = request.read()
             recorded_req = self._build_recorded_request(request, body_bytes)
 
-            if self._is_replaying:
-                return self._replay_response(request, recorded_req, stream=stream)
+            matched = self._match_replay_or_none(recorded_req)
+            if matched is not None:
+                return self._replay_interaction_response(request, matched, stream=stream)
 
             start = time.perf_counter()
             response = sender(request)
@@ -1060,8 +1088,11 @@ class TapeSession:
             body_bytes = await request.aread()
             recorded_req = self._build_recorded_request(request, body_bytes)
 
-            if self._is_replaying:
-                return await self._replay_response_async(request, recorded_req, stream=stream)
+            matched = self._match_replay_or_none(recorded_req)
+            if matched is not None:
+                return await self._replay_interaction_response_async(
+                    request, matched, stream=stream
+                )
 
             start = time.perf_counter()
             response: httpx.Response = await sender(request)

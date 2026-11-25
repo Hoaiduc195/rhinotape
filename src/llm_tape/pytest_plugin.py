@@ -390,11 +390,14 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
         yield session
     finally:
         test_failed = bool(getattr(request.node, _FAILED_ATTR, False))
-        action = (
-            "recorded"
-            if session._is_recording
-            else ("replayed" if session._is_replaying else "none")
-        )
+        if session._is_recording and session._is_replaying:
+            action = "updated" if session._recorded else "replayed"
+        elif session._is_recording:
+            action = "recorded"
+        elif session._is_replaying:
+            action = "replayed"
+        else:
+            action = "none"
         session._finalize(exc_occurred=test_failed)
         usage = session.total_usage
         interactions = session.interactions

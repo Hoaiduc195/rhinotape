@@ -207,8 +207,9 @@ def _dispatched_opener_open(
         body_bytes=body_bytes,
     )
 
-    if session._is_replaying:
-        interaction = session._pop_replay_interaction(recorded_req)
+    matched = session._match_replay_or_none(recorded_req)
+    if matched is not None:
+        interaction = matched
         delay_s = (
             (interaction.latency_ms * session.replay_latency_scale) / 1000.0
             if session.replay_latency_scale > 0.0 and interaction.latency_ms > 0.0

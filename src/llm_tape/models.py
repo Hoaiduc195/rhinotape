@@ -13,6 +13,7 @@ class TapeMode(str, Enum):
     ONCE = "once"  # Replay if cassette exists; otherwise record and save.
     REPLAY = "replay"  # Strict offline replay; fail if cassette or interaction missing.
     RECORD = "record"  # Always hit live network and overwrite cassette.
+    NEW_EPISODES = "new_episodes"  # Replay existing matches; record and append new requests.
     NONE = "none"  # Passthrough without recording or replaying.
 
     @classmethod
