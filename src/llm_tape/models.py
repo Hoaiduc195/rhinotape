@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -13,6 +13,7 @@ class TapeMode(str, Enum):
     ONCE = "once"  # Replay if cassette exists; otherwise record and save.
     REPLAY = "replay"  # Strict offline replay; fail if cassette or interaction missing.
     RECORD = "record"  # Always hit live network and overwrite cassette.
+    NEW_EPISODES = "new_episodes"  # Replay existing matches; record and append new requests.
     NONE = "none"  # Passthrough without recording or replaying.
 
     @classmethod
@@ -41,6 +42,19 @@ class CorruptCassetteError(TapeError):
 class UnmatchedRequestError(TapeError):
     """Raised when an outgoing request does not match any recorded interaction."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        incoming: RecordedRequest | None = None,
+        closest: RecordedRequest | None = None,
+        diff_text: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.incoming = incoming
+        self.closest = closest
+        self.diff_text = diff_text
+
 
 class TapeAssertionError(AssertionError, TapeError):
     """Raised when a tape assertion (budget, tokens, tool calls) fails."""
@@ -55,7 +69,11 @@ class ToolCall:
     call_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "name": self.name,
+            "arguments": self.arguments,
+            "call_id": self.call_id,
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ToolCall:
@@ -72,23 +90,36 @@ class Usage:
 
     input_tokens: int = 0
     output_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_creation_tokens: int = 0
+    reasoning_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
         return self.input_tokens + self.output_tokens
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
         }
+        if self.cached_input_tokens:
+            payload["cached_input_tokens"] = self.cached_input_tokens
+        if self.cache_creation_tokens:
+            payload["cache_creation_tokens"] = self.cache_creation_tokens
+        if self.reasoning_tokens:
+            payload["reasoning_tokens"] = self.reasoning_tokens
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Usage:
         return cls(
             input_tokens=int(data.get("input_tokens", 0)),
             output_tokens=int(data.get("output_tokens", 0)),
+            cached_input_tokens=int(data.get("cached_input_tokens", 0)),
+            cache_creation_tokens=int(data.get("cache_creation_tokens", 0)),
+            reasoning_tokens=int(data.get("reasoning_tokens", 0)),
         )
 
 
@@ -102,10 +133,11 @@ class LLMCallSummary:
     estimated_cost_usd: float = 0.0
     tool_calls: tuple[ToolCall, ...] = ()
     text: str = ""
+    thinking: str = ""
     is_stream: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "provider": self.provider,
             "model": self.model,
             "usage": self.usage.to_dict(),
@@ -114,6 +146,9 @@ class LLMCallSummary:
             "text": self.text,
             "is_stream": self.is_stream,
         }
+        if self.thinking:
+            payload["thinking"] = self.thinking
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LLMCallSummary:
@@ -124,6 +159,7 @@ class LLMCallSummary:
             estimated_cost_usd=float(data.get("estimated_cost_usd", 0.0)),
             tool_calls=tuple(ToolCall.from_dict(tc) for tc in data.get("tool_calls", [])),
             text=str(data.get("text", "")),
+            thinking=str(data.get("thinking", "")),
             is_stream=bool(data.get("is_stream", False)),
         )
 
@@ -140,7 +176,14 @@ class RecordedRequest:
     body_encoding: str = "json"  # "json" | "text" | "base64" | "empty"
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "method": self.method,
+            "url": self.url,
+            "headers": self.headers,
+            "body": self.body,
+            "fingerprint": self.fingerprint,
+            "body_encoding": self.body_encoding,
+        }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RecordedRequest:

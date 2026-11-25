@@ -1,6 +1,27 @@
 """llm-tape: Record, replay, and assert on LLM HTTP & SSE calls in pytest."""
 
+from llm_tape._version import __version__
 from llm_tape.cassette import Cassette
+from llm_tape.chaos import (
+    ReplayHook,
+    chain_replay_hooks,
+    corrupt_json_body,
+    fail_first,
+    fail_nth,
+    inject_latency,
+    truncate_stream,
+)
+from llm_tape.html_report import render_html_report
+from llm_tape.matchers import (
+    RequestMatcher,
+    match_all,
+    match_any,
+    match_header_equals,
+    match_json_regex,
+    match_json_subset,
+    match_method,
+    match_path,
+)
 from llm_tape.models import (
     CorruptCassetteError,
     Interaction,
@@ -15,32 +36,98 @@ from llm_tape.models import (
     UnmatchedRequestError,
     Usage,
 )
-from llm_tape.pricing import DEFAULT_PRICING, ModelPrice, estimate_cost_usd
-from llm_tape.session import TapeSession, tape, use_tape
+from llm_tape.pricing import (
+    DEFAULT_PRICING,
+    ModelPrice,
+    estimate_cache_savings_usd,
+    estimate_cost_usd,
+    load_pricing_file,
+)
+from llm_tape.scrubbing import (
+    DEFAULT_MATCH_ON,
+    MATCH_PATH_AND_BODY,
+    MATCH_RELAXED,
+    MATCH_STRICT,
+    PII_CREDIT_CARD,
+    PII_EMAIL,
+    PII_IPV4,
+    PII_JWT,
+    PII_PHONE,
+    PII_PRESETS,
+    PII_SSN,
+    VALID_MATCH_ON,
+    normalize_json_array_order,
+    redact_body,
+    redact_text,
+    resolve_pii_patterns,
+    summarize_json_diff,
+)
+from llm_tape.server import TapeReplayServer
+from llm_tape.session import TapeSession, replace_response, tape, use_tape
+from llm_tape.stores import CassetteStore, FileCassetteStore, MemoryCassetteStore
 from llm_tape.transport import AsyncTapeTransport, TapeTransport
 
 __all__ = [
     "AsyncTapeTransport",
     "Cassette",
+    "CassetteStore",
     "CorruptCassetteError",
+    "DEFAULT_MATCH_ON",
     "DEFAULT_PRICING",
+    "FileCassetteStore",
     "Interaction",
     "LLMCallSummary",
+    "MATCH_PATH_AND_BODY",
+    "MATCH_RELAXED",
+    "MATCH_STRICT",
+    "MemoryCassetteStore",
     "ModelPrice",
+    "PII_CREDIT_CARD",
+    "PII_EMAIL",
+    "PII_IPV4",
+    "PII_JWT",
+    "PII_PHONE",
+    "PII_PRESETS",
+    "PII_SSN",
     "RecordedRequest",
     "RecordedResponse",
+    "ReplayHook",
+    "RequestMatcher",
     "TapeAssertionError",
     "TapeError",
     "TapeMode",
     "TapeNotFoundError",
+    "TapeReplayServer",
     "TapeSession",
     "TapeTransport",
     "ToolCall",
     "UnmatchedRequestError",
     "Usage",
+    "VALID_MATCH_ON",
+    "__version__",
+    "chain_replay_hooks",
+    "corrupt_json_body",
+    "estimate_cache_savings_usd",
     "estimate_cost_usd",
+    "fail_first",
+    "fail_nth",
+    "inject_latency",
+    "load_pricing_file",
+    "match_all",
+    "match_any",
+    "match_header_equals",
+    "match_json_regex",
+    "match_json_subset",
+    "match_method",
+    "match_path",
+    "normalize_json_array_order",
+    "redact_body",
+    "redact_text",
+    "render_html_report",
+    "replace_response",
+    "resolve_pii_patterns",
+    "summarize_json_diff",
     "tape",
+    "truncate_stream",
     "use_tape",
 ]
-
-__version__ = "0.2.0"

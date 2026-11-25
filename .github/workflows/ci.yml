@@ -45,14 +45,18 @@ jobs:
 
       - name: Run pytest with coverage
         run: |
-          uv run --python ${{ matrix.python-version }} coverage run --source=llm_tape -m pytest -v
-          uv run --python ${{ matrix.python-version }} coverage report -m --fail-under=90
+          uv run --python ${{ matrix.python-version }} coverage run --source=llm_tape -m pytest -v -W error
+          uv run --python ${{ matrix.python-version }} coverage report -m --fail-under=93
+
+      - name: Dogfood llm-tape verify (secrets & PII)
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: uv run --python ${{ matrix.python-version }} llm-tape verify . --check-secrets --check-pii
 
       - name: Build package
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         run: uv build
 
-      - name: Verify runtime works without pytest installed
+      - name: Verify wheel installs cleanly across optional extras
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         run: |
           uv venv --python ${{ matrix.python-version }} .tmp-no-pytest-venv
