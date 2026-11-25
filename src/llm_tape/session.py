@@ -129,12 +129,14 @@ class _StreamContentDecoder:
         self._mode = "identity"
         self._zlib_obj: Any = None
         self._brotli_obj: Any = None
+        self._deflate_first_chunk = False
         if enc in {"gzip", "x-gzip"}:
             self._mode = "zlib"
             self._zlib_obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
         elif enc == "deflate":
             self._mode = "zlib"
-            self._zlib_obj = zlib.decompressobj(zlib.MAX_WBITS | 32)
+            self._zlib_obj = zlib.decompressobj(zlib.MAX_WBITS)
+            self._deflate_first_chunk = True
         elif enc == "br":
             try:
                 import brotli  # type: ignore[import-not-found]
@@ -156,6 +158,14 @@ class _StreamContentDecoder:
         if not chunk or self._mode == "identity":
             return chunk
         if self._mode == "zlib":
+            if self._deflate_first_chunk:
+                self._deflate_first_chunk = False
+                try:
+                    return bytes(self._zlib_obj.decompress(chunk))
+                except zlib.error:
+                    # Fallback to raw deflate (RFC 1951 without zlib wrapper)
+                    self._zlib_obj = zlib.decompressobj(-zlib.MAX_WBITS)
+                    return bytes(self._zlib_obj.decompress(chunk))
             return bytes(self._zlib_obj.decompress(chunk))
         if self._mode == "brotli":
             return bytes(self._brotli_obj.process(chunk))
@@ -350,8 +360,10 @@ class TapeSession:
         self._lock = threading.Lock()
         self._interactions: list[Interaction] = []
         self._recorded: list[Interaction] = []
-        self._replay_queues: dict[str, deque[Interaction]] = defaultdict(deque)
-        self._custom_replay_list: list[Interaction] = []
+        self._replay_queues: dict[str, deque[tuple[int, Interaction]]] = defaultdict(deque)
+        self._custom_replay_list: list[tuple[int, Interaction]] = []
+        self._total_loaded_count = 0
+        self._consumed_indices: set[int] = set()
         self._known_fingerprints: dict[str, int] = {}
         self._all_loaded_requests: list[RecordedRequest] = []
         self._is_replaying = False
@@ -372,6 +384,8 @@ class TapeSession:
                 self._recorded.clear()
                 self._replay_queues.clear()
                 self._custom_replay_list.clear()
+                self._total_loaded_count = 0
+                self._consumed_indices.clear()
                 self._known_fingerprints.clear()
                 self._all_loaded_requests.clear()
 
@@ -403,7 +417,8 @@ class TapeSession:
 
     def _load_replay_queues(self, cassette: Cassette) -> None:
         with self._lock:
-            for interaction in cassette.interactions:
+            self._total_loaded_count = len(cassette.interactions)
+            for idx, interaction in enumerate(cassette.interactions):
                 fp = fingerprint_request(
                     interaction.request.method,
                     interaction.request.url,
@@ -413,8 +428,8 @@ class TapeSession:
                     ignore_query_params=self.ignore_query_params,
                     match_on=self.match_on,
                 )
-                self._replay_queues[fp].append(interaction)
-                self._custom_replay_list.append(interaction)
+                self._replay_queues[fp].append((idx, interaction))
+                self._custom_replay_list.append((idx, interaction))
                 self._known_fingerprints[fp] = self._known_fingerprints.get(fp, 0) + 1
                 self._all_loaded_requests.append(interaction.request)
 
@@ -527,12 +542,13 @@ class TapeSession:
     def _pop_replay_interaction(self, recorded_req: RecordedRequest) -> Interaction:
         with self._lock:
             if self.custom_matcher is not None:
-                for idx, candidate in enumerate(self._custom_replay_list):
+                for pos, (orig_idx, candidate) in enumerate(self._custom_replay_list):
                     if self.custom_matcher(candidate.request, recorded_req):
                         if self.allow_playback_repeats and len(self._custom_replay_list) == 1:
                             interaction = candidate
                         else:
-                            interaction = self._custom_replay_list.pop(idx)
+                            _, interaction = self._custom_replay_list.pop(pos)
+                        self._consumed_indices.add(orig_idx)
                         self._interactions.append(interaction)
                         return interaction
                 diff_text = format_request_diff(
@@ -569,9 +585,10 @@ class TapeSession:
                     f"Closest recorded request diff:\n{diff_text}"
                 )
 
-            interaction = (
+            orig_idx, interaction = (
                 queue[0] if (self.allow_playback_repeats and len(queue) == 1) else queue.popleft()
             )
+            self._consumed_indices.add(orig_idx)
             self._interactions.append(interaction)
             return interaction
 
@@ -998,10 +1015,7 @@ class TapeSession:
         if not self._is_replaying:
             return
         with self._lock:
-            if self.custom_matcher is not None:
-                remaining = len(self._custom_replay_list)
-            else:
-                remaining = sum(len(q) for q in self._replay_queues.values())
+            remaining = max(0, self._total_loaded_count - len(self._consumed_indices))
         if remaining > 0:
             raise TapeAssertionError(
                 f"Cassette {self.cassette_path} has {remaining} unused recorded interaction(s). "

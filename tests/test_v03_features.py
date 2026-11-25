@@ -540,3 +540,185 @@ def test_pytester_ini_defaults(pytester: pytest.Pytester, tmp_path: Path) -> Non
     # Replay with different ts & trace_id succeeds using ini defaults
     res2 = pytester.runpytest("--tape-mode=replay")
     res2.assert_outcomes(passed=1)
+
+
+@pytest.mark.asyncio
+async def test_deflate_and_raw_deflate_streams_and_stream_latency_replay(tmp_path: Path) -> None:
+    import zlib
+
+    raw_sse = (
+        b'data: {"model":"gpt-4o-mini","choices":[{"delta":{"content":"Deflate OK"}}]}\n\n'
+        b'data: {"model":"gpt-4o-mini","choices":[],'
+        b'"usage":{"prompt_tokens":10,"completion_tokens":5}}\n\n'
+        b"data: [DONE]\n\n"
+    )
+
+    # 1. Zlib-wrapped deflate
+    zlib_bytes = zlib.compress(raw_sse)
+    # 2. Raw RFC 1951 deflate (no zlib header)
+    comp = zlib.compressobj(level=6, method=zlib.DEFLATED, wbits=-zlib.MAX_WBITS)
+    raw_deflate_bytes = comp.compress(raw_sse) + comp.flush()
+
+    class _SyncBytes(httpx.SyncByteStream):
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+
+        def __iter__(self) -> Iterator[bytes]:
+            mid = len(self._data) // 2
+            yield self._data[:mid]
+            yield self._data[mid:]
+
+    for label, payload in [("zlib", zlib_bytes), ("raw", raw_deflate_bytes)]:
+        cpath = tmp_path / f"deflate_{label}.tape.json"
+
+        def _make_handler(data: bytes) -> httpx.MockTransport:
+            def _h(request: httpx.Request) -> httpx.Response:
+                return httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream", "content-encoding": "deflate"},
+                    stream=_SyncBytes(data),
+                )
+
+            return httpx.MockTransport(_h)
+
+        with tape(cpath, mode="record") as session:
+            with httpx.Client(transport=_make_handler(payload)) as client:
+                with client.stream(
+                    "POST", "https://api.openai.com/v1/chat/completions", json={"m": label}
+                ) as r:
+                    _ = list(r.iter_bytes())
+            assert session.interactions[0].llm.text == "Deflate OK"
+            assert session.total_tokens == 15
+
+    # Streamed replay with replay_latency_scale > 0 (sync & async)
+    stream_path = tmp_path / "stream_delay.tape.json"
+
+    class _TwoChunkSync(httpx.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            time.sleep(0.01)
+            yield b'data: {"model":"gpt-4o-mini","choices":[{"delta":{"content":"A"}}]}\n\n'
+            time.sleep(0.01)
+            yield b'data: {"model":"gpt-4o-mini","choices":[{"delta":{"content":"B"}}]}\n\n'
+
+    def _slow_stream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=_TwoChunkSync(),
+        )
+
+    with tape(stream_path, mode="record"):
+        with httpx.Client(transport=httpx.MockTransport(_slow_stream)) as client:
+            with client.stream("POST", "https://api.openai.com/v1/chat/completions", json={}) as r:
+                _ = list(r.iter_bytes())
+
+    t0 = time.perf_counter()
+    with tape(stream_path, mode="replay", replay_latency_scale=1.0) as s_sync:
+        with httpx.Client(transport=httpx.MockTransport(_slow_stream)) as client:
+            with client.stream("POST", "https://api.openai.com/v1/chat/completions", json={}) as r:
+                assert len(list(r.iter_lines())) >= 2
+        s_sync.assert_no_unused_interactions()
+    assert time.perf_counter() - t0 >= 0.015
+
+    t1 = time.perf_counter()
+    async with tape(stream_path, mode="replay", replay_latency_scale=1.0) as s_async:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_slow_stream)) as client:
+            async with client.stream(
+                "POST", "https://api.openai.com/v1/chat/completions", json={}
+            ) as r:
+                chunks = [c async for c in r.aiter_text()]
+                assert len(chunks) >= 2
+        s_async.assert_no_unused_interactions()
+    assert time.perf_counter() - t1 >= 0.015
+
+
+def test_unused_interactions_with_allow_playback_repeats_and_extra_edge_cases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cassette_path = tmp_path / "repeats.tape.json"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    with tape(cassette_path, mode="record"):
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            client.post("https://api.openai.com/v1/chat/completions", json={"x": 1})
+
+    # allow_playback_repeats=True must STILL mark the interaction as consumed
+    with tape(cassette_path, mode="replay", allow_playback_repeats=True) as session:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            client.post("https://api.openai.com/v1/chat/completions", json={"x": 1})
+            client.post("https://api.openai.com/v1/chat/completions", json={"x": 1})
+        session.assert_call_count(2)
+        session.assert_no_unused_interactions()
+
+    # Same with custom_matcher + allow_playback_repeats=True
+    with tape(
+        cassette_path,
+        mode="replay",
+        allow_playback_repeats=True,
+        custom_matcher=lambda rec, inc: True,
+    ) as session:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            client.post("https://api.openai.com/v1/chat/completions", json={"x": 2})
+            client.post("https://api.openai.com/v1/chat/completions", json={"x": 3})
+        session.assert_call_count(2)
+        session.assert_no_unused_interactions()
+
+    # Wildcard dict & list index redaction
+    obj = {"meta": {"a": 1, "b": 2}, "items": [{"secret": "s1"}, {"secret": "s2"}]}
+    out = redact_body(obj, redact_fields=["meta.*", "items.*.secret", "items.0"])
+    assert out["meta"] == {"a": "[REDACTED]", "b": "[REDACTED]"}
+    assert out["items"][0] == "[REDACTED]"
+    assert out["items"][1] == {"secret": "[REDACTED]"}
+
+    # OpenAI Responses API response.completed SSE event + Ollama /api/generate + NDJSON tools
+    resp_completed_chunks = [
+        'data: {"type":"response.output_text.delta","delta":"Draft "}\n\n',
+        (
+            'data: {"type":"response.completed","response":{"model":"gpt-4.1-mini",'
+            '"output":[{"type":"message","content":[{"type":"output_text",'
+            '"text":"Final answer"}]}],'
+            '"usage":{"input_tokens":100,"output_tokens":20,'
+            '"input_tokens_details":{"cached_tokens":50}}}}\n\n'
+        ),
+    ]
+    s_resp = parse_llm_interaction(
+        "https://api.openai.com/v1/responses",
+        {},
+        None,
+        stream_chunks=resp_completed_chunks,
+        content_type="text/event-stream",
+    )
+    assert s_resp.text == "Final answer"
+    assert s_resp.usage.cached_input_tokens == 50
+
+    s_gen = parse_llm_interaction(
+        "http://localhost:11434/api/generate",
+        {"model": "llama3.2"},
+        {"response": "Generated text", "done": True, "prompt_eval_count": 12, "eval_count": 8},
+    )
+    assert s_gen.provider == "ollama"
+    assert s_gen.text == "Generated text"
+
+    s_ndjson = parse_llm_interaction(
+        "http://localhost:11434/api/chat",
+        {"model": "llama3.2"},
+        None,
+        stream_chunks=[
+            "not-json\n",
+            '{"message":{"content":"","tool_calls":[{"function":{"name":"ping","arguments":{"host":"1.1.1.1"}}}]}}\n',
+            '{"response":"done","done":true,"prompt_eval_count":5,"eval_count":3}\n',
+        ],
+        content_type="application/x-ndjson",
+    )
+    assert s_ndjson.tool_calls[0].name == "ping"
+    assert s_ndjson.text == "done"
+
+    # Bad pricing entry & broken env pricing file fallback
+    bad_entry = tmp_path / "bad_entry.json"
+    bad_entry.write_text('{"m": 123}', encoding="utf-8")
+    with pytest.raises(ValueError, match="JSON object"):
+        load_pricing_file(bad_entry)
+    monkeypatch.setenv(PRICING_FILE_ENV, str(bad_entry))
+    assert estimate_cost_usd("gpt-4o-mini", 1_000_000, 0) == pytest.approx(0.15)
