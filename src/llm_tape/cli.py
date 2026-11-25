@@ -40,6 +40,7 @@ from llm_tape.pricing import (
     load_pricing_file,
 )
 from llm_tape.scrubbing import (
+    PII_PRESETS,
     compile_patterns,
     fingerprint_request,
     redact_body,
@@ -432,10 +433,11 @@ def _cmd_verify(
     targets: list[Path],
     *,
     check_secrets: bool = False,
+    check_pii: bool = False,
     secret_patterns: list[str] | None = None,
     as_json: bool = False,
 ) -> int:
-    """Validate .tape.json(.gz) cassette(s) for schema integrity and optional secret leaks."""
+    """Validate .tape.json(.gz) cassette(s) for schema integrity and optional secret/PII leaks."""
     if not targets:
         targets = [Path(".")]
     for target in targets:
@@ -448,6 +450,9 @@ def _cmd_verify(
         compiled_patterns.extend(_BUILTIN_SECRET_PATTERNS)
         for idx, pat in enumerate(secret_patterns or (), start=1):
             compiled_patterns.append((f"custom_{idx}", re.compile(pat)))
+    if check_pii:
+        for pii_name, pii_pat in PII_PRESETS.items():
+            compiled_patterns.append((f"pii_{pii_name}", pii_pat))
 
     files_set: set[Path] = set()
     for target in targets:
@@ -2105,6 +2110,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Scan cassettes for common unredacted API keys and bearer tokens.",
     )
     p_verify.add_argument(
+        "--check-pii",
+        action="store_true",
+        help="Scan cassettes for unredacted PII (email, phone, SSN, credit card, IPv4, JWT).",
+    )
+    p_verify.add_argument(
         "--secret-pattern",
         action="append",
         default=[],
@@ -2457,6 +2467,7 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_verify(
                 args.targets,
                 check_secrets=args.check_secrets,
+                check_pii=args.check_pii,
                 secret_patterns=args.secret_patterns,
                 as_json=args.as_json,
             )
