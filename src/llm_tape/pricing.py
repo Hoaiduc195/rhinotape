@@ -49,7 +49,9 @@ DEFAULT_PRICING: dict[str, ModelPrice] = {
     "gpt-4.1": ModelPrice(2.00, 8.00, cached_input_per_million=0.50),
     "gpt-4.1-mini": ModelPrice(0.40, 1.60, cached_input_per_million=0.10),
     "gpt-4.1-nano": ModelPrice(0.10, 0.40, cached_input_per_million=0.025),
+    "o3": ModelPrice(2.00, 8.00, cached_input_per_million=0.50),
     "o3-mini": ModelPrice(1.10, 4.40, cached_input_per_million=0.55),
+    "o4-mini": ModelPrice(1.10, 4.40, cached_input_per_million=0.275),
     # Anthropic
     "claude-3-5-sonnet": ModelPrice(3.00, 15.00, cached_input_per_million=0.30),
     "claude-3-5-haiku": ModelPrice(0.80, 4.00, cached_input_per_million=0.08),

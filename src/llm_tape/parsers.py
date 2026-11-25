@@ -107,6 +107,13 @@ def _extract_openai_cached_tokens(usage_data: dict[str, Any]) -> int:
     return 0
 
 
+def _extract_openai_reasoning_tokens(usage_data: dict[str, Any]) -> int:
+    details = usage_data.get("completion_tokens_details") or usage_data.get("output_tokens_details")
+    if isinstance(details, dict):
+        return int(details.get("reasoning_tokens", 0) or 0)
+    return 0
+
+
 def _parse_openai_json(
     url: str,
     request_body: Any,
@@ -127,10 +134,12 @@ def _parse_openai_json(
         usage_data.get("completion_tokens", usage_data.get("output_tokens", 0)) or 0
     )
     cached_tokens = _extract_openai_cached_tokens(usage_data)
+    reasoning_tokens = _extract_openai_reasoning_tokens(usage_data)
     usage = Usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cached_input_tokens=cached_tokens,
+        reasoning_tokens=reasoning_tokens,
     )
 
     tool_calls: list[ToolCall] = []
@@ -252,13 +261,13 @@ def _parse_gemini_json(
     usage_meta = response_body.get("usageMetadata") or {}
     input_tokens = int(usage_meta.get("promptTokenCount", 0) or 0)
     cached_tokens = int(usage_meta.get("cachedContentTokenCount", 0) or 0)
-    output_tokens = int(usage_meta.get("candidatesTokenCount", 0) or 0) + int(
-        usage_meta.get("thoughtsTokenCount", 0) or 0
-    )
+    thoughts_tokens = int(usage_meta.get("thoughtsTokenCount", 0) or 0)
+    output_tokens = int(usage_meta.get("candidatesTokenCount", 0) or 0) + thoughts_tokens
     usage = Usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cached_input_tokens=cached_tokens,
+        reasoning_tokens=thoughts_tokens,
     )
 
     tool_calls: list[ToolCall] = []
@@ -458,6 +467,7 @@ def _parse_openai_sse(
     input_tokens = 0
     output_tokens = 0
     cached_tokens = 0
+    reasoning_tokens = 0
     text_parts: list[str] = []
     # index -> {"id": str|None, "name": str, "args": list[str]}
     tool_acc: dict[int, dict[str, Any]] = {}
@@ -509,6 +519,9 @@ def _parse_openai_sse(
             c_toks = _extract_openai_cached_tokens(usage_data)
             if c_toks:
                 cached_tokens = c_toks
+            r_toks = _extract_openai_reasoning_tokens(usage_data)
+            if r_toks:
+                reasoning_tokens = r_toks
 
         for choice in payload.get("choices") or []:
             delta = choice.get("delta") or {}
@@ -538,6 +551,7 @@ def _parse_openai_sse(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cached_input_tokens=cached_tokens,
+        reasoning_tokens=reasoning_tokens,
     )
     cost = estimate_cost_usd(
         model,
@@ -566,6 +580,7 @@ def _parse_anthropic_sse(
     input_tokens = 0
     output_tokens = 0
     cached_tokens = 0
+    reasoning_tokens = 0
     text_parts: list[str] = []
     tool_acc: dict[int, dict[str, Any]] = {}
 
@@ -622,6 +637,7 @@ def _parse_anthropic_sse(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cached_input_tokens=cached_tokens,
+        reasoning_tokens=reasoning_tokens,
     )
     cost = estimate_cost_usd(
         model,
@@ -654,6 +670,7 @@ def _parse_gemini_sse(
     input_tokens = 0
     output_tokens = 0
     cached_tokens = 0
+    reasoning_tokens = 0
     text_parts: list[str] = []
     tool_calls: list[ToolCall] = []
 
@@ -665,9 +682,10 @@ def _parse_gemini_sse(
         um = payload.get("usageMetadata")
         if isinstance(um, dict):
             input_tokens = int(um.get("promptTokenCount", input_tokens) or 0)
-            output_tokens = int(um.get("candidatesTokenCount", 0) or 0) + int(
-                um.get("thoughtsTokenCount", 0) or 0
-            )
+            thoughts = int(um.get("thoughtsTokenCount", 0) or 0)
+            if thoughts:
+                reasoning_tokens = thoughts
+            output_tokens = int(um.get("candidatesTokenCount", 0) or 0) + thoughts
             if "cachedContentTokenCount" in um:
                 cached_tokens = int(um.get("cachedContentTokenCount", 0) or 0)
         for cand in payload.get("candidates") or []:
@@ -690,6 +708,7 @@ def _parse_gemini_sse(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cached_input_tokens=cached_tokens,
+        reasoning_tokens=reasoning_tokens,
     )
     cost = estimate_cost_usd(
         model,

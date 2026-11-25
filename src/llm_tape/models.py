@@ -73,6 +73,7 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cached_input_tokens: int = 0
+    reasoning_tokens: int = 0
 
     @property
     def total_tokens(self) -> int:
@@ -86,6 +87,8 @@ class Usage:
         }
         if self.cached_input_tokens:
             payload["cached_input_tokens"] = self.cached_input_tokens
+        if self.reasoning_tokens:
+            payload["reasoning_tokens"] = self.reasoning_tokens
         return payload
 
     @classmethod
@@ -94,6 +97,7 @@ class Usage:
             input_tokens=int(data.get("input_tokens", 0)),
             output_tokens=int(data.get("output_tokens", 0)),
             cached_input_tokens=int(data.get("cached_input_tokens", 0)),
+            reasoning_tokens=int(data.get("reasoning_tokens", 0)),
         )
 
 
