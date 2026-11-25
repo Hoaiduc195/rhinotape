@@ -33,17 +33,24 @@ from llm_tape.scrubbing import (
 )
 
 _BUILTIN_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")),
-    ("openai_key", re.compile(r"\bsk-(?:proj-|svcacct-|admin-)?[A-Za-z0-9_-]{20,}\b")),
-    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
-    ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("anthropic_key", re.compile(r"(?<![A-Za-z0-9_-])sk-ant-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])")),
+    (
+        "openai_key",
+        re.compile(
+            r"(?<![A-Za-z0-9_-])sk-(?!ant-)(?:proj-|svcacct-|admin-)?"
+            r"[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])"
+        ),
+    ),
+    ("google_api_key", re.compile(r"(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35}(?![A-Za-z0-9_-])")),
+    ("aws_access_key", re.compile(r"(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9])")),
     (
         "github_token",
         re.compile(
-            r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{22,}\b"
+            r"(?<![A-Za-z0-9_])(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}(?![A-Za-z0-9_])"
+            r"|(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{22,}(?![A-Za-z0-9_])"
         ),
     ),
-    ("slack_token", re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b")),
+    ("slack_token", re.compile(r"(?<![A-Za-z0-9_-])xox[baprs]-[0-9A-Za-z-]{10,}(?![A-Za-z0-9_-])")),
     (
         "bearer_token",
         re.compile(r"(?i)\bBearer\s+(?!\[REDACTED\]|REDACTED|<REDACTED>)[A-Za-z0-9._~+/=-]{16,}"),
@@ -238,6 +245,10 @@ def _scan_cassette_secrets(
     patterns: list[tuple[str, re.Pattern[str]]],
 ) -> list[dict[str, str]]:
     findings: list[dict[str, str]] = []
+    if cassette.metadata:
+        findings.extend(
+            _scan_text_for_secrets(_body_to_scan_text(cassette.metadata), "metadata", patterns)
+        )
     for idx, inter in enumerate(cassette.interactions):
         prefix = f"interactions[{idx}]"
         findings.extend(
@@ -358,16 +369,21 @@ def _check_diff_gates(
     fail_on_tool_change: bool,
 ) -> list[str]:
     violations: list[str] = []
-    if max_cost_increase is not None and round(delta_cost, 8) > max_cost_increase:
+    rounded_before = round(before_cost, 8)
+    rounded_delta = round(delta_cost, 8)
+    if max_cost_increase is not None and rounded_delta > max_cost_increase:
         violations.append(
-            f"Cost increased by ${delta_cost:+.6f} > --max-cost-increase ${max_cost_increase:.6f}"
+            f"Cost increased by ${rounded_delta:+.6f} > "
+            f"--max-cost-increase ${max_cost_increase:.6f}"
         )
-    if max_cost_increase_pct is not None and round(delta_cost, 8) > 0:
-        if before_cost <= 0:
+    if max_cost_increase_pct is not None and rounded_delta > 0:
+        if rounded_before <= 0:
             pct_increase = math.inf
+            exceeds = True
         else:
-            pct_increase = (delta_cost / before_cost) * 100.0
-        if pct_increase > max_cost_increase_pct:
+            pct_increase = (rounded_delta / rounded_before) * 100.0
+            exceeds = round(pct_increase, 8) > max_cost_increase_pct
+        if exceeds:
             pct_str = "inf%" if math.isinf(pct_increase) else f"{pct_increase:.2f}%"
             violations.append(
                 f"Cost increased by {pct_str} > "
@@ -714,21 +730,31 @@ def _cmd_prune(
             file=sys.stderr,
         )
         return 1
-    if tests_dir is not None and not tests_dir.exists():
+    if tests_dir is not None and (not tests_dir.exists() or not tests_dir.is_dir()):
         print(f"Error: tests directory not found: {tests_dir}", file=sys.stderr)
         return 1
-    if older_than_days is not None and older_than_days < 0:
-        print("Error: --older-than-days must be >= 0.", file=sys.stderr)
+    if older_than_days is not None and (not math.isfinite(older_than_days) or older_than_days < 0):
+        print("Error: --older-than-days must be a finite number >= 0.", file=sys.stderr)
         return 1
 
     discovered = _discover_test_names(tests_dir) if tests_dir is not None else None
-    cutoff = (
-        datetime.now(timezone.utc) - timedelta(days=older_than_days)
-        if older_than_days is not None
-        else None
-    )
+    cutoff: datetime | None = None
+    if older_than_days is not None:
+        try:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+        except OverflowError:
+            print(
+                f"Error: --older-than-days value {older_than_days} is out of range.",
+                file=sys.stderr,
+            )
+            return 1
 
-    files = sorted(directory.rglob("*.tape.json"))
+    resolved_root = directory.resolve()
+    files = [
+        p
+        for p in sorted(directory.rglob("*.tape.json"))
+        if not p.is_symlink() and p.is_file() and p.resolve().is_relative_to(resolved_root)
+    ]
     candidates: list[dict[str, Any]] = []
 
     for file_path in files:
@@ -755,14 +781,18 @@ def _cmd_prune(
 
     deleted_count = 0
     if apply:
-        resolved_root = directory.resolve()
         for item in candidates:
             target = Path(item["path"])
             target.unlink(missing_ok=True)
             deleted_count += 1
             # Clean up empty parent directories strictly inside `directory`
             parent = target.parent
-            while parent.resolve() != resolved_root:
+            while parent != parent.parent:
+                parent_resolved = parent.resolve()
+                if parent_resolved == resolved_root or not parent_resolved.is_relative_to(
+                    resolved_root
+                ):
+                    break
                 try:
                     parent.rmdir()
                 except OSError:

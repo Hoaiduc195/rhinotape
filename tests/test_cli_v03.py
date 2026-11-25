@@ -285,3 +285,59 @@ def test_with_marker():
     assert not (tapes_dir / "orphan_dir").exists()
     assert not (tapes_dir / "orphan_old_dir").exists()
     assert tapes_dir.exists()
+
+
+def test_rv_cli_review_regressions(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # P1 #1: --tests-dir pointing to a single file must fail instead of wiping all cassettes
+    test_file = tmp_path / "test_one.py"
+    test_file.write_text("def test_one(): pass\n", encoding="utf-8")
+    tapes_dir = tmp_path / "tapes"
+    keep = _write_cassette(tapes_dir / "test_one.tape.json")
+    assert main(["prune", str(tapes_dir), "--tests-dir", str(test_file), "--apply"]) == 1
+    assert keep.exists()
+    capsys.readouterr()
+
+    # P1 #2: symlinks (including broken/external) and dirs named *.tape.json are skipped safely
+    outside = _write_cassette(tmp_path / "outside.tape.json")
+    (tapes_dir / "ext_link.tape.json").symlink_to(outside)
+    (tapes_dir / "broken_link.tape.json").symlink_to(tmp_path / "does_not_exist.tape.json")
+    (tapes_dir / "fake_dir.tape.json").mkdir()
+    assert main(["prune", str(tapes_dir), "--older-than-days", "0", "--apply"]) == 0
+    assert outside.exists()
+    assert (tapes_dir / "ext_link.tape.json").is_symlink()
+    assert (tapes_dir / "broken_link.tape.json").is_symlink()
+    assert (tapes_dir / "fake_dir.tape.json").is_dir()
+    capsys.readouterr()
+
+    # P2 #3 & #4: Google API key ending in '-', no duplicate openai+anthropic hit, metadata scan
+    google_key_trailing_dash = "AIza" + "A" * 34 + "-"
+    anth_key = "sk-ant-" + "B" * 24
+    c_path = _write_cassette(
+        tmp_path / "sec.tape.json",
+        req_body={"g": google_key_trailing_dash, "a": anth_key},
+    )
+    c = Cassette.load(c_path)
+    c.metadata["leaked_meta"] = "ghp_" + "C" * 36
+    c.save()
+    assert main(["verify", str(c_path), "--check-secrets", "--json"]) == 1
+    sec_data = json.loads(capsys.readouterr().out)
+    patterns_found = [f["pattern"] for f in sec_data["secret_findings"]]
+    assert "google_api_key" in patterns_found
+    assert "anthropic_key" in patterns_found
+    assert "openai_key" not in patterns_found
+    assert any(
+        f["location"] == "metadata" and f["pattern"] == "github_token"
+        for f in sec_data["secret_findings"]
+    )
+
+    # P2 #5: nan/inf/overflow in --older-than-days rejected cleanly
+    assert main(["prune", str(tapes_dir), "--older-than-days", "nan"]) == 1
+    assert main(["prune", str(tapes_dir), "--older-than-days", "inf"]) == 1
+    assert main(["prune", str(tapes_dir), "--older-than-days", "1e12"]) == 1
+    capsys.readouterr()
+
+    # P2 #6: exact percentage boundary (0.0003 -> 0.00039 = 30.0%) does not false-fail
+    b1 = _write_cassette(tmp_path / "b1.tape.json", cost=0.0003)
+    b2 = _write_cassette(tmp_path / "b2.tape.json", cost=0.00039)
+    assert main(["diff", str(b1), str(b2), "--max-cost-increase-pct", "30"]) == 0
+    capsys.readouterr()
