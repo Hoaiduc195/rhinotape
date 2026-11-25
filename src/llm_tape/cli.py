@@ -1236,6 +1236,139 @@ def _cmd_convert(
     return 1 if conflicts else 0
 
 
+def _percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    idx = max(0, min(len(ordered) - 1, math.ceil((pct / 100.0) * len(ordered)) - 1))
+    return ordered[idx]
+
+
+def _cmd_stats(target: Path, *, as_json: bool = False) -> int:
+    """Aggregate LLM usage, cache hit rate, cost, and avg/p95 latency grouped by provider/model."""
+    if not target.exists():
+        print(f"Error: path not found: {target}", file=sys.stderr)
+        return 1
+
+    files = [target] if target.is_file() else iter_cassette_files(target)
+    if not files:
+        if as_json:
+            print(json.dumps({"models": [], "errors": [], "totals": {}}, indent=2))
+        else:
+            print(f"No .tape.json cassettes found in {target}")
+        return 0
+
+    buckets: dict[tuple[str, str], dict[str, Any]] = {}
+    errors: list[dict[str, str]] = []
+    all_latencies: list[float] = []
+
+    for file_path in files:
+        try:
+            cassette = Cassette.load(file_path)
+        except CorruptCassetteError as exc:
+            errors.append({"path": str(file_path), "error": str(exc)})
+            if not as_json:
+                print(f"Warning: skipping corrupt cassette {file_path}: {exc}", file=sys.stderr)
+            continue
+        for inter in cassette.interactions:
+            key = (inter.llm.provider, inter.llm.model or "<unknown>")
+            b = buckets.setdefault(
+                key,
+                {
+                    "provider": key[0],
+                    "model": key[1],
+                    "calls": 0,
+                    "input_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 0,
+                    "reasoning_tokens": 0,
+                    "total_tokens": 0,
+                    "estimated_cost_usd": 0.0,
+                    "latencies": [],
+                },
+            )
+            b["calls"] += 1
+            b["input_tokens"] += inter.llm.usage.input_tokens
+            b["cached_input_tokens"] += inter.llm.usage.cached_input_tokens
+            b["output_tokens"] += inter.llm.usage.output_tokens
+            b["reasoning_tokens"] += inter.llm.usage.reasoning_tokens
+            b["total_tokens"] += inter.llm.usage.total_tokens
+            b["estimated_cost_usd"] += inter.llm.estimated_cost_usd
+            b["latencies"].append(inter.latency_ms)
+            all_latencies.append(inter.latency_ms)
+
+    rows: list[dict[str, Any]] = []
+    for b in buckets.values():
+        lats: list[float] = b["latencies"]
+        inp = int(b["input_tokens"])
+        cached = int(b["cached_input_tokens"])
+        cache_pct = round((cached / inp) * 100.0, 1) if inp > 0 else 0.0
+        rows.append(
+            {
+                "provider": b["provider"],
+                "model": b["model"],
+                "calls": b["calls"],
+                "input_tokens": inp,
+                "cached_input_tokens": cached,
+                "cache_hit_pct": cache_pct,
+                "output_tokens": b["output_tokens"],
+                "reasoning_tokens": b["reasoning_tokens"],
+                "total_tokens": b["total_tokens"],
+                "estimated_cost_usd": round(float(b["estimated_cost_usd"]), 8),
+                "avg_latency_ms": round(sum(lats) / len(lats), 2) if lats else 0.0,
+                "p95_latency_ms": round(_percentile(lats, 95.0), 2),
+            }
+        )
+    rows.sort(key=lambda r: (-float(r["estimated_cost_usd"]), -int(r["calls"]), str(r["model"])))
+
+    total_calls = sum(int(r["calls"]) for r in rows)
+    total_input = sum(int(r["input_tokens"]) for r in rows)
+    total_cached = sum(int(r["cached_input_tokens"]) for r in rows)
+    total_tokens = sum(int(r["total_tokens"]) for r in rows)
+    total_reasoning = sum(int(r["reasoning_tokens"]) for r in rows)
+    total_cost = round(sum(float(r["estimated_cost_usd"]) for r in rows), 8)
+    totals = {
+        "files": len(files) - len(errors),
+        "calls": total_calls,
+        "input_tokens": total_input,
+        "cached_input_tokens": total_cached,
+        "cache_hit_pct": round((total_cached / total_input) * 100.0, 1) if total_input > 0 else 0.0,
+        "reasoning_tokens": total_reasoning,
+        "total_tokens": total_tokens,
+        "estimated_cost_usd": total_cost,
+        "avg_latency_ms": (
+            round(sum(all_latencies) / len(all_latencies), 2) if all_latencies else 0.0
+        ),
+        "p95_latency_ms": round(_percentile(all_latencies, 95.0), 2),
+    }
+
+    if as_json:
+        print(json.dumps({"models": rows, "errors": errors, "totals": totals}, indent=2))
+        return 1 if errors else 0
+
+    print(
+        f"{'Provider':<11} {'Model':<26} {'Calls':>5} {'Tokens':>9} "
+        f"{'Cache%':>6} {'Cost':>11} {'Avg ms':>8} {'p95 ms':>8}"
+    )
+    print("-" * 91)
+    for r in rows:
+        model_label = str(r["model"])
+        if len(model_label) > 26:
+            model_label = model_label[:23] + "..."
+        print(
+            f"{r['provider']:<11} {model_label:<26} {r['calls']:>5} {r['total_tokens']:>9} "
+            f"{r['cache_hit_pct']:>5.1f}% ${r['estimated_cost_usd']:>10.6f} "
+            f"{r['avg_latency_ms']:>8.1f} {r['p95_latency_ms']:>8.1f}"
+        )
+    print("-" * 91)
+    print(
+        f"{'TOTAL':<38} {total_calls:>5} {total_tokens:>9} "
+        f"{totals['cache_hit_pct']:>5.1f}% ${total_cost:>10.6f} "
+        f"{totals['avg_latency_ms']:>8.1f} {totals['p95_latency_ms']:>8.1f}"
+    )
+    return 1 if errors else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llm-tape",
@@ -1459,6 +1592,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Overwrite existing destination cassette files on collision.",
     )
 
+    p_stats = sub.add_parser(
+        "stats",
+        help="Show per-provider/model token, cache-hit, cost, and avg/p95 latency breakdown.",
+    )
+    p_stats.add_argument(
+        "target",
+        type=Path,
+        nargs="?",
+        default=Path("."),
+        help="Cassette file or directory to analyze (default: current directory).",
+    )
+    p_stats.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
+
     return parser
 
 
@@ -1518,6 +1664,8 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=args.dry_run,
                 force=args.force,
             )
+        if args.command == "stats":
+            return _cmd_stats(args.target, as_json=args.as_json)
     except (TapeError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

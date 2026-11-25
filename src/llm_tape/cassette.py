@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import io
 import json
 import os
@@ -51,6 +52,16 @@ class Cassette:
     interactions: list[Interaction] = field(default_factory=list)
     recorded_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     metadata: dict[str, Any] = field(default_factory=dict)
+
+    def content_hash(self) -> str:
+        """Return deterministic SHA-256 hex digest of this cassette's recorded interactions."""
+        canonical = json.dumps(
+            [i.to_dict() for i in self.interactions],
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @classmethod
     def load(cls, path: str | Path) -> Cassette:
