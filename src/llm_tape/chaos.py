@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -71,5 +72,37 @@ def fail_first(
             body=err_body,
             headers=merged_headers,
         )
+
+    return _hook
+
+
+def inject_latency(extra_ms: float, *, nth: int | None = None) -> ReplayHook:
+    """Return an on_replay hook that adds `extra_ms` to interaction latency_ms."""
+    if not math.isfinite(extra_ms) or extra_ms < 0.0:
+        raise ValueError("extra_ms must be a finite number >= 0.0")
+    if nth is not None and nth < 0:
+        raise ValueError("nth must be >= 0")
+
+    def _hook(interaction: Interaction, call_index: int) -> Interaction | None:
+        if nth is not None and call_index != nth:
+            return None
+        return replace_response(interaction, latency_ms=interaction.latency_ms + extra_ms)
+
+    return _hook
+
+
+def corrupt_json_body(
+    nth: int | None = None,
+    *,
+    payload: str = '{"choices":[{"message":',
+) -> ReplayHook:
+    """Return an on_replay hook that replaces the response body with malformed JSON text."""
+    if nth is not None and nth < 0:
+        raise ValueError("nth must be >= 0")
+
+    def _hook(interaction: Interaction, call_index: int) -> Interaction | None:
+        if nth is not None and call_index != nth:
+            return None
+        return replace_response(interaction, body=payload)
 
     return _hook
