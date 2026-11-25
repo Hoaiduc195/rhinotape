@@ -55,7 +55,8 @@ def scrub_headers(
     extra_sensitive: Iterable[str] = (),
 ) -> dict[str, str]:
     """Return a copy of headers with sensitive values redacted."""
-    sensitive = DEFAULT_SENSITIVE_HEADERS | {h.lower() for h in extra_sensitive}
+    extra_set = {h.lower() for h in extra_sensitive} if extra_sensitive else None
+    sensitive = DEFAULT_SENSITIVE_HEADERS | extra_set if extra_set else DEFAULT_SENSITIVE_HEADERS
     items = headers.items() if isinstance(headers, Mapping) else headers
     cleaned: dict[str, str] = {}
     for key, value in items:
@@ -72,12 +73,19 @@ def scrub_url(
     ignore_query_params: Iterable[str] = (),
 ) -> str:
     """Return URL with basic-auth userinfo and sensitive query params redacted and sorted."""
-    sensitive = DEFAULT_SENSITIVE_QUERY_PARAMS | {p.lower() for p in extra_sensitive}
-    ignored = {p.lower() for p in ignore_query_params}
     parts = urlsplit(url)
+    has_userinfo = "@" in parts.netloc
+    if not parts.query and not has_userinfo:
+        return url
+
+    extra_set = {p.lower() for p in extra_sensitive} if extra_sensitive else None
+    sensitive = (
+        DEFAULT_SENSITIVE_QUERY_PARAMS | extra_set if extra_set else DEFAULT_SENSITIVE_QUERY_PARAMS
+    )
+    ignored = {p.lower() for p in ignore_query_params} if ignore_query_params else frozenset()
 
     netloc = parts.netloc
-    if "@" in netloc:
+    if has_userinfo:
         _, hostport = netloc.rsplit("@", 1)
         netloc = f"{URL_USERINFO_REDACTED}@{hostport}"
 
@@ -210,26 +218,31 @@ def _redact_path(node: Any, parts: list[str]) -> None:
                     _redact_path(node[idx], rest)
 
 
-def _compile_patterns(patterns: Iterable[str | re.Pattern[str]]) -> list[re.Pattern[str]]:
+def compile_patterns(patterns: Iterable[str | re.Pattern[str]]) -> tuple[re.Pattern[str], ...]:
+    """Compile an iterable of regex strings or pre-compiled Patterns into a tuple."""
     compiled: list[re.Pattern[str]] = []
     for pat in patterns:
         if isinstance(pat, re.Pattern):
             compiled.append(pat)
         elif isinstance(pat, str) and pat:
             compiled.append(re.compile(pat))
-    return compiled
+    return tuple(compiled)
 
 
 def redact_text(text: str, redact_patterns: Iterable[str | re.Pattern[str]]) -> str:
     """Apply regex redaction patterns to a string."""
-    compiled = _compile_patterns(redact_patterns)
+    if not text or not redact_patterns:
+        return text
+    compiled = compile_patterns(redact_patterns)
+    if not compiled:
+        return text
     result = text
     for pat in compiled:
         result = pat.sub(REDACTED, result)
     return result
 
 
-def _redact_patterns_in_node(node: Any, compiled: list[re.Pattern[str]]) -> Any:
+def _redact_patterns_in_node(node: Any, compiled: Sequence[re.Pattern[str]]) -> Any:
     if isinstance(node, str):
         result = node
         for pat in compiled:
@@ -250,8 +263,8 @@ def redact_body(
     scrub_body: Callable[[Any], Any] | None = None,
 ) -> Any:
     """Return a copy of body with dot-path fields, regex patterns, and custom scrubber applied."""
-    fields = [f.strip() for f in redact_fields if f.strip()]
-    compiled = _compile_patterns(redact_patterns)
+    fields = [f.strip() for f in redact_fields if f.strip()] if redact_fields else []
+    compiled = compile_patterns(redact_patterns) if redact_patterns else ()
     if not fields and not compiled and scrub_body is None:
         return body
 
@@ -383,20 +396,15 @@ def format_request_diff(
     )
     incoming_text = "\n".join(incoming_lines)
 
-    best_cand = max(
-        candidates,
-        key=lambda c: difflib.SequenceMatcher(
-            None,
-            "\n".join(
-                _render_request_for_diff(
-                    c, ignore_fields=ignore_fields, ignore_query_params=ignore_query_params
-                )
-            ),
-            incoming_text,
-        ).ratio(),
-    )
-    recorded_lines = _render_request_for_diff(
-        best_cand, ignore_fields=ignore_fields, ignore_query_params=ignore_query_params
+    rendered_candidates = [
+        _render_request_for_diff(
+            c, ignore_fields=ignore_fields, ignore_query_params=ignore_query_params
+        )
+        for c in candidates
+    ]
+    recorded_lines = max(
+        rendered_candidates,
+        key=lambda lines: difflib.SequenceMatcher(None, "\n".join(lines), incoming_text).ratio(),
     )
     diff_lines = list(
         difflib.unified_diff(

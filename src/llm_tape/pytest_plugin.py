@@ -45,6 +45,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,
         help="Base directory for .tape.json cassettes (defaults to <test_dir>/tapes).",
     )
+    group.addoption(
+        "--tape-compress",
+        action="store_true",
+        default=False,
+        help="Write gzip-compressed .tape.json.gz cassettes.",
+    )
 
     parser.addini(
         "tape_mode",
@@ -55,6 +61,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "tape_dir",
         help="Default base directory for .tape.json cassettes.",
         default="",
+    )
+    parser.addini(
+        "tape_compress",
+        help="Write gzip-compressed .tape.json.gz cassettes by default.",
+        type="bool",
+        default=False,
     )
     parser.addini(
         "tape_ignore_localhost",
@@ -85,7 +97,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
-        "tape(name=None, mode=None, ignore_localhost=None, ignore_hosts=(), "
+        "tape(name=None, mode=None, compress=None, ignore_localhost=None, ignore_hosts=(), "
         "ignore_fields=(), ignore_query_params=(), redact_fields=(), redact_patterns=(), "
         "scrub_body=None, match_on=None, custom_matcher=None, replay_latency_scale=0.0, "
         "allow_playback_repeats=False, save_on_error=False): "
@@ -108,9 +120,11 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
     """Provide an active TapeSession scoped to the current pytest test."""
     cli_mode = request.config.getoption("--tape-mode")
     cli_dir = request.config.getoption("--tape-dir")
+    cli_compress = bool(request.config.getoption("--tape-compress"))
 
     ini_mode = str(request.config.getini("tape_mode") or TapeMode.ONCE.value)
     ini_dir = str(request.config.getini("tape_dir") or "")
+    ini_compress = bool(request.config.getini("tape_compress"))
     ini_ignore_localhost = bool(request.config.getini("tape_ignore_localhost"))
     ini_ignore_hosts = list(request.config.getini("tape_ignore_hosts") or [])
     ini_ignore_fields = list(request.config.getini("tape_ignore_fields") or [])
@@ -151,7 +165,13 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
         raw_test_name = request.node.name
 
     test_slug = _sanitize_segment(raw_test_name, unique_seed=request.node.nodeid)
-    cassette_path = base_dir / file_slug / f"{test_slug}.tape.json"
+    compress = (
+        bool(marker_kwargs["compress"])
+        if marker_kwargs.get("compress") is not None
+        else (cli_compress or ini_compress)
+    )
+    ext = ".tape.json.gz" if compress else ".tape.json"
+    cassette_path = base_dir / file_slug / f"{test_slug}{ext}"
 
     ignore_localhost = (
         bool(marker_kwargs["ignore_localhost"])

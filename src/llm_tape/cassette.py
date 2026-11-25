@@ -1,10 +1,12 @@
-"""Cassette file serialization (.tape.json) with atomic writes and schema validation."""
+"""Cassette file serialization (.tape.json / .tape.json.gz) with atomic writes and validation."""
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 import tempfile
+import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,11 +15,27 @@ from typing import Any
 from llm_tape.models import CorruptCassetteError, Interaction, TapeNotFoundError
 
 SCHEMA_VERSION = 2
+CASSETTE_EXTENSIONS: tuple[str, ...] = (".tape.json", ".tape.json.gz")
+_GZIP_MAGIC = b"\x1f\x8b"
+
+
+def is_cassette_file(path: Path) -> bool:
+    """Return True if path has a supported llm-tape cassette extension."""
+    lower = path.name.lower()
+    return any(lower.endswith(ext) for ext in CASSETTE_EXTENSIONS)
+
+
+def iter_cassette_files(directory: Path) -> list[Path]:
+    """Return sorted list of .tape.json and .tape.json.gz files under directory."""
+    found: set[Path] = set()
+    for ext in CASSETTE_EXTENSIONS:
+        found.update(directory.rglob(f"*{ext}"))
+    return sorted(found)
 
 
 @dataclass
 class Cassette:
-    """In-memory representation of a .tape.json cassette file."""
+    """In-memory representation of a .tape.json or .tape.json.gz cassette file."""
 
     path: Path
     interactions: list[Interaction] = field(default_factory=list)
@@ -33,8 +51,20 @@ class Cassette:
                 "Run with mode='once' or mode='record' first to record interactions."
             )
         try:
-            raw = json.loads(cassette_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            raw_bytes = cassette_path.read_bytes()
+            if cassette_path.suffix.lower() == ".gz" or raw_bytes[:2] == _GZIP_MAGIC:
+                text = gzip.decompress(raw_bytes).decode("utf-8")
+            else:
+                text = raw_bytes.decode("utf-8")
+            raw = json.loads(text)
+        except (
+            OSError,
+            gzip.BadGzipFile,
+            zlib.error,
+            EOFError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ) as exc:
             raise CorruptCassetteError(f"Failed to read cassette {cassette_path}: {exc}") from exc
 
         if not isinstance(raw, dict):
@@ -92,20 +122,23 @@ class Cassette:
             },
             "interactions": [i.to_dict() for i in self.interactions],
         }
-        serialized = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+        serialized = (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        if self.path.suffix.lower() == ".gz":
+            data_bytes = gzip.compress(serialized, mtime=0)
+        else:
+            data_bytes = serialized
 
         tmp_path: str | None = None
         try:
             with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
+                mode="wb",
                 dir=self.path.parent,
                 prefix=f".{self.path.stem}.",
                 suffix=".tmp",
                 delete=False,
             ) as tmp:
                 tmp_path = tmp.name
-                tmp.write(serialized)
+                tmp.write(data_bytes)
                 tmp.flush()
                 os.fsync(tmp.fileno())
             os.replace(tmp_path, self.path)

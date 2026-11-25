@@ -8,6 +8,7 @@ import contextvars
 import fnmatch
 import functools
 import inspect
+import math
 import re
 import threading
 import time
@@ -36,6 +37,7 @@ from llm_tape.parsers import parse_llm_interaction
 from llm_tape.pricing import ModelPrice
 from llm_tape.scrubbing import (
     DEFAULT_MATCH_ON,
+    compile_patterns,
     decode_body_with_encoding,
     encode_body_with_encoding,
     fingerprint_request,
@@ -351,8 +353,8 @@ class TapeSession:
         save_on_error: bool = False,
         patch_httpx: bool = True,
     ) -> None:
-        if replay_latency_scale < 0.0:
-            raise ValueError("replay_latency_scale must be >= 0.0")
+        if not math.isfinite(replay_latency_scale) or replay_latency_scale < 0.0:
+            raise ValueError("replay_latency_scale must be a finite number >= 0.0")
         self.cassette_path = Path(cassette_path)
         self.mode = TapeMode.coerce(mode)
         self.custom_pricing = custom_pricing
@@ -365,6 +367,10 @@ class TapeSession:
         self.ignore_query_params = tuple(ignore_query_params)
         self.redact_fields = tuple(redact_fields)
         self.redact_patterns = tuple(redact_patterns)
+        self._compiled_redact_patterns = compile_patterns(self.redact_patterns)
+        self._has_body_redaction = bool(
+            self.redact_fields or self._compiled_redact_patterns or scrub_body is not None
+        )
         self.scrub_body = scrub_body
         self.match_on = validate_match_on(match_on)
         self.custom_matcher = custom_matcher
@@ -530,11 +536,11 @@ class TapeSession:
         clean_url = scrub_url(str(request.url), self.extra_sensitive_query_params)
         clean_headers = scrub_headers(request.headers.items(), self.extra_sensitive_headers)
         decoded_body, body_encoding = decode_body_with_encoding(body_bytes)
-        if body_encoding not in {"base64", "empty"}:
+        if self._has_body_redaction and body_encoding not in {"base64", "empty"}:
             decoded_body = redact_body(
                 decoded_body,
                 redact_fields=self.redact_fields,
-                redact_patterns=self.redact_patterns,
+                redact_patterns=self._compiled_redact_patterns,
                 scrub_body=self.scrub_body,
             )
         fp = fingerprint_request(
@@ -710,10 +716,12 @@ class TapeSession:
         content_type = response.headers.get("content-type", "")
 
         if stream_chunks is not None:
-            if self.redact_patterns:
-                per_chunk = [redact_text(c, self.redact_patterns) for c in stream_chunks]
+            if self._compiled_redact_patterns:
+                per_chunk = [redact_text(c, self._compiled_redact_patterns) for c in stream_chunks]
                 joined_per_chunk = "".join(per_chunk)
-                joined_redacted = redact_text("".join(stream_chunks), self.redact_patterns)
+                joined_redacted = redact_text(
+                    "".join(stream_chunks), self._compiled_redact_patterns
+                )
                 if joined_redacted != joined_per_chunk:
                     # Secret spanned across TCP chunk boundary: re-split on SSE event boundaries
                     parts = joined_redacted.split("\n\n")
@@ -742,11 +750,11 @@ class TapeSession:
             )
         else:
             decoded_resp_body, resp_encoding = decode_body_with_encoding(response_bytes or b"")
-            if resp_encoding not in {"base64", "empty"}:
+            if self._has_body_redaction and resp_encoding not in {"base64", "empty"}:
                 decoded_resp_body = redact_body(
                     decoded_resp_body,
                     redact_fields=self.redact_fields,
-                    redact_patterns=self.redact_patterns,
+                    redact_patterns=self._compiled_redact_patterns,
                     scrub_body=self.scrub_body,
                 )
             recorded_resp = RecordedResponse(

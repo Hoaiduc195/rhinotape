@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from llm_tape._version import __version__ as _VERSION
-from llm_tape.cassette import Cassette
+from llm_tape.cassette import Cassette, iter_cassette_files
 from llm_tape.models import (
     CorruptCassetteError,
     Interaction,
@@ -135,7 +135,7 @@ def _cmd_summary(
         print(f"Error: directory not found: {directory}", file=sys.stderr)
         return 1
 
-    files = sorted(directory.rglob("*.tape.json"))
+    files = iter_cassette_files(directory)
     if not files:
         if as_json:
             print(json.dumps({"files": [], "errors": [], "totals": {}}, indent=2))
@@ -311,7 +311,7 @@ def _cmd_verify(
         for idx, pat in enumerate(secret_patterns or (), start=1):
             compiled_patterns.append((f"custom_{idx}", re.compile(pat)))
 
-    files = [target] if target.is_file() else sorted(target.rglob("*.tape.json"))
+    files = [target] if target.is_file() else iter_cassette_files(target)
     schema_errors: list[dict[str, str]] = []
     secret_findings: list[dict[str, str]] = []
 
@@ -501,8 +501,8 @@ def _cmd_diff_dirs(
     max_cost_increase_pct: float | None = None,
     fail_on_tool_change: bool = False,
 ) -> int:
-    map_a = {str(p.relative_to(dir_a)): p for p in sorted(dir_a.rglob("*.tape.json"))}
-    map_b = {str(p.relative_to(dir_b)): p for p in sorted(dir_b.rglob("*.tape.json"))}
+    map_a = {str(p.relative_to(dir_a)): p for p in iter_cassette_files(dir_a)}
+    map_b = {str(p.relative_to(dir_b)): p for p in iter_cassette_files(dir_b)}
     all_keys = sorted(set(map_a) | set(map_b))
 
     added: list[str] = []
@@ -682,8 +682,9 @@ def _discover_test_names(tests_dir: Path) -> set[str]:
 
 def _cassette_stem(path: Path) -> str:
     name = path.name
-    if name.endswith(".tape.json"):
-        return name[: -len(".tape.json")]
+    for suffix in (".tape.json.gz", ".tape.json"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
     return path.stem
 
 
@@ -752,7 +753,7 @@ def _cmd_prune(
     resolved_root = directory.resolve()
     files = [
         p
-        for p in sorted(directory.rglob("*.tape.json"))
+        for p in iter_cassette_files(directory)
         if not p.is_symlink() and p.is_file() and p.resolve().is_relative_to(resolved_root)
     ]
     candidates: list[dict[str, Any]] = []
@@ -836,7 +837,7 @@ def _cmd_redact(
         print(f"Error: path not found: {target}", file=sys.stderr)
         return 1
 
-    files = [target] if target.is_file() else sorted(target.rglob("*.tape.json"))
+    files = [target] if target.is_file() else iter_cassette_files(target)
     if not files:
         print(f"No .tape.json cassettes found in {target}")
         return 0
