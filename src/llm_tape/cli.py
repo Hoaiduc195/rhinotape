@@ -1663,6 +1663,62 @@ def _cmd_replay_check(target: Path, *, as_json: bool = False) -> int:
     return 0
 
 
+def _cmd_reparse(target: Path, *, dry_run: bool = False) -> int:
+    """Re-run LLM metadata and pricing parsers across cassette(s)."""
+    if not target.exists():
+        print(f"Error: path not found: {target}", file=sys.stderr)
+        return 1
+    files = [target] if target.is_file() else iter_cassette_files(target)
+    if not files:
+        print(f"No .tape.json cassettes found in {target}")
+        return 0
+
+    updated = 0
+    for file_path in files:
+        cassette = Cassette.load(file_path)
+        new_interactions: list[Interaction] = []
+        changed = False
+        for inter in cassette.interactions:
+            ct = ""
+            for k, v in inter.response.headers.items():
+                if k.lower() == "content-type":
+                    ct = v
+                    break
+            reparsed = parse_llm_interaction(
+                url=inter.request.url,
+                request_body=inter.request.body,
+                response_body=inter.response.body,
+                stream_chunks=inter.response.stream_chunks,
+                content_type=ct,
+            )
+            if reparsed != inter.llm:
+                changed = True
+                new_interactions.append(
+                    Interaction(
+                        request=inter.request,
+                        response=inter.response,
+                        latency_ms=inter.latency_ms,
+                        llm=reparsed,
+                    )
+                )
+            else:
+                new_interactions.append(inter)
+        if changed:
+            updated += 1
+            if dry_run:
+                print(f"WOULD REPARSE: {file_path}")
+            else:
+                cassette.interactions = new_interactions
+                cassette.save()
+                print(f"REPARSED: {file_path}")
+
+    if dry_run:
+        print(f"Dry run: {updated} of {len(files)} cassette(s) would be updated.")
+    else:
+        print(f"Reparsed {updated} of {len(files)} cassette(s).")
+    return 0
+
+
 def _cmd_schema(*, output: Path | None = None) -> int:
     """Output the Draft 2020-12 JSON Schema for .tape.json cassettes."""
     rendered = json.dumps(cassette_json_schema(), indent=2, ensure_ascii=False) + "\n"
@@ -2144,6 +2200,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_rcheck.add_argument("target", type=Path, nargs="?", default=Path("."))
     p_rcheck.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
 
+    p_reparse = sub.add_parser(
+        "reparse",
+        help="Re-run LLM metadata and cost parsers on existing cassettes.",
+    )
+    p_reparse.add_argument("target", type=Path, nargs="?", default=Path("."))
+    p_reparse.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report cassettes that would change without saving.",
+    )
+
     return parser
 
 
@@ -2241,6 +2308,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "replay-check":
             return _cmd_replay_check(args.target, as_json=args.as_json)
+        if args.command == "reparse":
+            return _cmd_reparse(args.target, dry_run=args.dry_run)
     except (TapeError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
