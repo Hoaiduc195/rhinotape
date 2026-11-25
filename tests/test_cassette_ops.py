@@ -86,3 +86,33 @@ def test_wave21_cassette_clone_and_stats(tmp_path: Path) -> None:
     assert st["total_tokens"] == 30
     assert st["estimated_cost_usd"] == 0.002
     assert st["latency_ms"] == 12.5
+
+
+def test_wave22_cassette_sort_and_validate(tmp_path: Path) -> None:
+    c = Cassette(
+        path=tmp_path / "sort.tape.json",
+        interactions=[
+            _mk_inter("c", latency=5),
+            _mk_inter("a", latency=30),
+            _mk_inter("b", latency=15),
+        ],
+    )
+    assert [i.request.fingerprint for i in c.sort_interactions().interactions] == ["a", "b", "c"]
+    by_lat = c.sort_interactions(key=lambda i: i.latency_ms, reverse=True)
+    assert [i.request.fingerprint for i in by_lat.interactions] == ["a", "b", "c"]
+    assert c.validate() == []
+
+    bad = Cassette(
+        path=tmp_path / "bad.tape.json",
+        interactions=[
+            Interaction(
+                request=RecordedRequest("", "", {}, None, "", body_encoding="weird"),
+                response=RecordedResponse(
+                    999, {}, None, body_encoding="stream", stream_chunks=None
+                ),
+                latency_ms=-1.0,
+            )
+        ],
+    )
+    issues = bad.validate()
+    assert len(issues) == 7

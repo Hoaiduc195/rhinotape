@@ -249,6 +249,57 @@ class Cassette:
             "tools": [tc.name for i in self.interactions for tc in i.llm.tool_calls],
         }
 
+    def sort_interactions(
+        self,
+        *,
+        key: Callable[[Interaction], Any] | None = None,
+        reverse: bool = False,
+    ) -> Cassette:
+        """Return a new Cassette with interactions sorted (default: by url, method, fingerprint)."""
+        sort_key = key or (lambda i: (i.request.url, i.request.method, i.request.fingerprint))
+        return Cassette(
+            path=self.path,
+            interactions=sorted(self.interactions, key=sort_key, reverse=reverse),
+            recorded_at=self.recorded_at,
+            metadata=dict(self.metadata),
+        )
+
+    def validate(self) -> list[str]:
+        """Validate cassette structure in memory and return a list of issue strings (empty = OK)."""
+        issues: list[str] = []
+        valid_req_enc = {"json", "text", "base64", "empty"}
+        valid_resp_enc = {"json", "text", "base64", "empty", "stream"}
+        for idx, inter in enumerate(self.interactions):
+            if not inter.request.method:
+                issues.append(f"interactions[{idx}].request.method is empty")
+            if not inter.request.url:
+                issues.append(f"interactions[{idx}].request.url is empty")
+            if not inter.request.fingerprint:
+                issues.append(f"interactions[{idx}].request.fingerprint is empty")
+            if inter.request.body_encoding not in valid_req_enc:
+                issues.append(
+                    f"interactions[{idx}].request.body_encoding invalid: "
+                    f"{inter.request.body_encoding!r}"
+                )
+            if not (100 <= inter.response.status_code <= 599):
+                issues.append(
+                    f"interactions[{idx}].response.status_code out of range: "
+                    f"{inter.response.status_code}"
+                )
+            if inter.response.body_encoding not in valid_resp_enc:
+                issues.append(
+                    f"interactions[{idx}].response.body_encoding invalid: "
+                    f"{inter.response.body_encoding!r}"
+                )
+            if inter.response.body_encoding == "stream" and inter.response.stream_chunks is None:
+                issues.append(
+                    f"interactions[{idx}].response has body_encoding='stream' "
+                    "but stream_chunks is None"
+                )
+            if inter.latency_ms < 0:
+                issues.append(f"interactions[{idx}].latency_ms is negative: {inter.latency_ms}")
+        return issues
+
     @classmethod
     def load(cls, path: str | Path) -> Cassette:
         cassette_path = Path(path)
