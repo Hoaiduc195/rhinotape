@@ -69,6 +69,7 @@ def replace_response(
     headers: dict[str, str] | None = None,
     stream_chunks: tuple[str, ...] | None = _UNSET,
     latency_ms: float | None = None,
+    custom_pricing: dict[str, ModelPrice] | None = None,
 ) -> Interaction:
     """Return a copy of an Interaction with modified response fields for chaos/fault replay."""
     orig = interaction.response
@@ -85,17 +86,23 @@ def replace_response(
         new_encoding = "stream"
     elif body_changed:
         new_chunks = None
-        new_body = body
-        if body is None:
+        if isinstance(body, (bytes, bytearray, memoryview)):
+            new_body, new_encoding = decode_body_with_encoding(bytes(body))
+        elif body is None:
+            new_body = None
             new_encoding = "empty"
         elif isinstance(body, (dict, list, int, float, bool)):
+            new_body = body
             new_encoding = "json"
         else:
+            new_body = body
             new_encoding = "text"
     else:
         new_chunks = orig.stream_chunks if stream_chunks is _UNSET else stream_chunks
         new_body = orig.body
         new_encoding = orig.body_encoding
+        if new_chunks is None and new_encoding == "stream":
+            new_encoding = "empty" if new_body is None else "text"
 
     new_resp = RecordedResponse(
         status_code=new_status,
@@ -114,6 +121,7 @@ def replace_response(
             url=interaction.request.url,
             request_body=interaction.request.body,
             response_body=new_body,
+            custom_pricing=custom_pricing,
             stream_chunks=new_chunks,
             content_type=ct,
         )

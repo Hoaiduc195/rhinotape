@@ -104,3 +104,40 @@ async def test_on_replay_mutates_llm_body_and_validates_return_type(tmp_path: Pa
     ):
         with pytest.raises(TypeError, match="must return Interaction or None"):
             httpx.post("https://api.openai.com/v1/chat/completions", json={"q": "hi"})
+
+
+def test_replace_response_bytes_stream_clear_and_custom_pricing(tmp_path: Path) -> None:
+    from llm_tape import Cassette, ModelPrice
+
+    tape_path = tmp_path / "edge.tape.json"
+    _record_basic_tape(tape_path)
+    orig = Cassette.load(tape_path).interactions[0]
+
+    # P1: bytes payload decoded faithfully (binary -> base64, not repr)
+    bin_bytes = b"\x89PNG\r\n\x1a\n\xff\xfe"
+    with tape(
+        tape_path,
+        mode=TapeMode.REPLAY,
+        on_replay=lambda inter, i: replace_response(inter, body=bin_bytes),
+    ):
+        r = httpx.post("https://api.openai.com/v1/chat/completions", json={"q": "hi"})
+        assert r.content == bin_bytes
+
+    # P2 #2: clearing stream_chunks=None resets body_encoding from "stream" to "empty"
+    streamed = replace_response(orig, stream_chunks=('data: {"a":1}\n\n',))
+    assert streamed.response.body_encoding == "stream"
+    cleared = replace_response(streamed, stream_chunks=None)
+    assert cleared.response.stream_chunks is None
+    assert cleared.response.body_encoding == "empty"
+
+    # P2 #3: custom_pricing forwarded cleanly
+    priced = replace_response(
+        orig,
+        body={
+            "model": "my-custom-model",
+            "choices": [{"message": {"role": "assistant", "content": "x"}}],
+            "usage": {"prompt_tokens": 1_000_000, "completion_tokens": 0},
+        },
+        custom_pricing={"my-custom-model": ModelPrice(5.0, 10.0)},
+    )
+    assert priced.llm.estimated_cost_usd == pytest.approx(5.0)
