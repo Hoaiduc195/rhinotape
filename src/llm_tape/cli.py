@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -1188,6 +1189,46 @@ def _render_har(cassettes: list[Cassette]) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
 
 
+def _render_junit(cassettes: list[Cassette], base_dir: Path) -> str:
+    failures = 0
+    total_time_s = 0.0
+    suite = ET.Element("testsuite", name="llm-tape", tests=str(len(cassettes)))
+    for c in cassettes:
+        s = _cassette_stats(c)
+        rel = str(c.path.relative_to(base_dir))
+        t_sec = round(float(s["latency_ms"]) / 1000.0, 6)
+        total_time_s += t_sec
+        tc = ET.SubElement(
+            suite,
+            "testcase",
+            classname="llm_tape",
+            name=rel,
+            time=f"{t_sec:.6f}",
+        )
+        err_codes = [
+            f"{i.request.method} {i.request.url} -> {i.response.status_code}"
+            for i in c.interactions
+            if i.response.status_code >= 400
+        ]
+        if err_codes:
+            failures += 1
+            fail_el = ET.SubElement(
+                tc,
+                "failure",
+                message=f"{len(err_codes)} HTTP error interaction(s)",
+            )
+            fail_el.text = "\n".join(err_codes)
+        sys_out = ET.SubElement(tc, "system-out")
+        sys_out.text = (
+            f"calls={s['calls']} tokens={s['total_tokens']} cost_usd={s['estimated_cost_usd']:.6f}"
+        )
+    suite.set("failures", str(failures))
+    suite.set("time", f"{total_time_s:.6f}")
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(suite, encoding="unicode") + "\n"
+    )
+
+
 def _cmd_export(target: Path, *, fmt: str, output: Path | None = None) -> int:
     """Export cassette(s) as Markdown PR summary, CSV cost report, or HAR 1.2 archive."""
     if not target.exists():
@@ -1204,6 +1245,8 @@ def _cmd_export(target: Path, *, fmt: str, output: Path | None = None) -> int:
         from llm_tape.html_report import render_html_report
 
         rendered = render_html_report(cassettes, title=f"llm-tape Trace ({target})")
+    elif fmt == "junit":
+        rendered = _render_junit(cassettes, base_dir)
     elif fmt == "csv":
         buf = io.StringIO()
         writer = csv.writer(buf, lineterminator="\n")
@@ -2035,10 +2078,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_export.add_argument(
         "--format",
-        choices=["markdown", "csv", "har", "html"],
+        choices=["markdown", "csv", "har", "html", "junit"],
         default="markdown",
         dest="fmt",
-        help="Output format: markdown (default), csv, har, or html.",
+        help="Output format: markdown (default), csv, har, html, or junit.",
     )
     p_export.add_argument(
         "-o",
