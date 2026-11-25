@@ -46,7 +46,7 @@ jobs:
       - name: Run pytest with coverage
         run: |
           uv run --python ${{ matrix.python-version }} coverage run --source=llm_tape -m pytest -v -W error
-          uv run --python ${{ matrix.python-version }} coverage report -m --fail-under=90
+          uv run --python ${{ matrix.python-version }} coverage report -m --fail-under=93
 
       - name: Dogfood llm-tape verify (secrets & PII)
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
