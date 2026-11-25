@@ -83,6 +83,10 @@ DEFAULT_PRICING: dict[str, ModelPrice] = {
     "command-a": ModelPrice(2.50, 10.00),
     "command-r-plus": ModelPrice(2.50, 10.00),
     "command-r": ModelPrice(0.15, 0.60),
+    # xAI Grok
+    "grok-3": ModelPrice(3.00, 15.00, cached_input_per_million=0.75),
+    "grok-3-mini": ModelPrice(0.30, 0.50, cached_input_per_million=0.075),
+    "grok-2": ModelPrice(2.00, 10.00),
 }
 
 
