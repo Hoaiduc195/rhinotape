@@ -47,6 +47,7 @@ from llm_tape.scrubbing import (
     format_request_diff,
     redact_body,
     redact_text,
+    resolve_pii_patterns,
     scrub_headers,
     scrub_url,
     validate_match_on,
@@ -426,6 +427,7 @@ class TapeSession:
         ignore_query_params: Iterable[str] = (),
         redact_fields: Iterable[str] = (),
         redact_patterns: Iterable[str | re.Pattern[str]] = (),
+        redact_pii: bool | str | Iterable[str] = False,
         scrub_body: Callable[[Any], Any] | None = None,
         match_on: Iterable[str] = DEFAULT_MATCH_ON,
         match_headers: Iterable[str] = (),
@@ -453,7 +455,11 @@ class TapeSession:
         self.ignore_query_params = tuple(ignore_query_params)
         self.redact_fields = tuple(redact_fields)
         self.redact_patterns = tuple(redact_patterns)
-        self._compiled_redact_patterns = compile_patterns(self.redact_patterns)
+        self.redact_pii = redact_pii
+        self._compiled_redact_patterns = (
+            *compile_patterns(self.redact_patterns),
+            *resolve_pii_patterns(redact_pii),
+        )
         self._has_body_redaction = bool(
             self.redact_fields or self._compiled_redact_patterns or scrub_body is not None
         )
@@ -1440,6 +1446,7 @@ def tape(
     ignore_query_params: Iterable[str] = (),
     redact_fields: Iterable[str] = (),
     redact_patterns: Iterable[str | re.Pattern[str]] = (),
+    redact_pii: bool | str | Iterable[str] = False,
     scrub_body: Callable[[Any], Any] | None = None,
     match_on: Iterable[str] = DEFAULT_MATCH_ON,
     match_headers: Iterable[str] = (),
@@ -1467,6 +1474,7 @@ def tape(
         ignore_query_params=ignore_query_params,
         redact_fields=redact_fields,
         redact_patterns=redact_patterns,
+        redact_pii=redact_pii,
         scrub_body=scrub_body,
         match_on=match_on,
         match_headers=match_headers,
