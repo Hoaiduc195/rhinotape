@@ -45,7 +45,7 @@ class MemoryCassetteStore:
         return Cassette.from_bytes(raw, path=Path(key))
 
     def save(self, key: str, cassette: Cassette) -> None:
-        raw = cassette.to_bytes(compress=self._compress)
+        raw = cassette.to_bytes(compress=self._compress or Path(key).suffix.lower() == ".gz")
         with self._lock:
             self._data[key] = raw
 
@@ -73,7 +73,7 @@ class FileCassetteStore:
         if raw.is_absolute():
             raise ValueError(f"Cassette store key must be relative, got {key!r}")
         target = (self.root_dir / raw).resolve()
-        if not target.is_relative_to(self.root_dir):
+        if target == self.root_dir or not target.is_relative_to(self.root_dir):
             raise ValueError(f"Cassette store key escapes root directory: {key!r}")
         return target
 

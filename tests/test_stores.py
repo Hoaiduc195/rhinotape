@@ -91,6 +91,16 @@ def test_memory_cassette_store_with_tape_session() -> None:
     store.clear()
     assert store.list_keys() == []
 
+    # MemoryCassetteStore(compress=False) with .gz key must round-trip cleanly
+    plain_store = MemoryCassetteStore(compress=False)
+    with tape("compressed.tape.json.gz", mode=TapeMode.RECORD, store=plain_store):
+        with httpx.Client(transport=_mock_transport()) as client:
+            client.post(
+                "https://api.openai.com/v1/chat/completions",
+                json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "gz"}]},
+            )
+    assert plain_store.load("compressed.tape.json.gz").interactions[0].llm.text == "stored ok"
+
 
 def test_file_cassette_store_and_path_traversal_guard(tmp_path: Path) -> None:
     store = FileCassetteStore(tmp_path)
@@ -110,6 +120,8 @@ def test_file_cassette_store_and_path_traversal_guard(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="escapes root directory"):
         store.exists("../outside.tape.json")
+    with pytest.raises(ValueError, match="escapes root directory"):
+        store.exists(".")
     with pytest.raises(ValueError, match="must be relative"):
         store.exists("/etc/passwd")
 
