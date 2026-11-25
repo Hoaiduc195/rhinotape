@@ -143,18 +143,64 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         type="bool",
         default=False,
     )
+    parser.addini(
+        "tape_max_cost",
+        help="Fail the pytest session if total estimated LLM USD cost exceeds this limit.",
+        default="",
+    )
+    parser.addini(
+        "tape_max_tokens",
+        help="Fail the pytest session if total LLM tokens exceed this limit.",
+        default="",
+    )
+
+
+def _resolve_max_cost(config: pytest.Config) -> float | None:
+    cli_val = config.getoption("--tape-max-cost", default=None)
+    if cli_val is not None:
+        val = float(cli_val)
+    else:
+        raw = (
+            os.environ.get("LLM_TAPE_MAX_COST", "").strip()
+            or str(config.getini("tape_max_cost") or "").strip()
+        )
+        if not raw:
+            return None
+        try:
+            val = float(raw)
+        except ValueError as exc:
+            raise pytest.UsageError(f"Invalid tape_max_cost value: {raw!r}") from exc
+    if not math.isfinite(val) or val < 0.0:
+        raise pytest.UsageError("tape_max_cost / --tape-max-cost must be a finite number >= 0.")
+    return val
+
+
+def _resolve_max_tokens(config: pytest.Config) -> int | None:
+    cli_val = config.getoption("--tape-max-tokens", default=None)
+    if cli_val is not None:
+        val = int(cli_val)
+    else:
+        raw = (
+            os.environ.get("LLM_TAPE_MAX_TOKENS", "").strip()
+            or str(config.getini("tape_max_tokens") or "").strip()
+        )
+        if not raw:
+            return None
+        try:
+            val = int(raw)
+        except ValueError as exc:
+            raise pytest.UsageError(f"Invalid tape_max_tokens value: {raw!r}") from exc
+    if val < 0:
+        raise pytest.UsageError("tape_max_tokens / --tape-max-tokens must be >= 0.")
+    return val
 
 
 def pytest_configure(config: pytest.Config) -> None:
     config.stash[_REPORT_KEY] = []
     config.stash[_VIOLATIONS_KEY] = []
 
-    max_cost = config.getoption("--tape-max-cost", default=None)
-    if max_cost is not None and (not math.isfinite(max_cost) or max_cost < 0.0):
-        raise pytest.UsageError("--tape-max-cost must be a finite number >= 0.")
-    max_tokens = config.getoption("--tape-max-tokens", default=None)
-    if max_tokens is not None and max_tokens < 0:
-        raise pytest.UsageError("--tape-max-tokens must be >= 0.")
+    _resolve_max_cost(config)
+    _resolve_max_tokens(config)
 
     config.addinivalue_line(
         "markers",
@@ -235,8 +281,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     totals = _compute_report_totals(entries)
 
     violations: list[str] = []
-    max_tokens = session.config.getoption("--tape-max-tokens", default=None)
-    max_cost = session.config.getoption("--tape-max-cost", default=None)
+    max_tokens = _resolve_max_tokens(session.config)
+    max_cost = _resolve_max_cost(session.config)
 
     if max_tokens is not None and int(totals["total_tokens"]) > max_tokens:
         violations.append(
@@ -385,9 +431,11 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
     marker_name = marker_kwargs.get("name")
     marker_mode = marker_kwargs.get("mode")
 
-    mode = TapeMode.coerce(marker_mode or cli_mode or ini_mode)
+    env_mode = os.environ.get("LLM_TAPE_MODE", "").strip() or None
+    env_dir = os.environ.get("LLM_TAPE_DIR", "").strip() or None
+    mode = TapeMode.coerce(marker_mode or cli_mode or env_mode or ini_mode)
 
-    effective_dir = cli_dir or ini_dir or None
+    effective_dir = cli_dir or env_dir or ini_dir or None
     test_path = Path(str(request.path))
     if effective_dir:
         base_dir = Path(str(effective_dir))
