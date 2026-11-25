@@ -713,7 +713,7 @@ class TapeSession:
             if self.redact_patterns:
                 per_chunk = [redact_text(c, self.redact_patterns) for c in stream_chunks]
                 joined_per_chunk = "".join(per_chunk)
-                joined_redacted = redact_text(joined_per_chunk, self.redact_patterns)
+                joined_redacted = redact_text("".join(stream_chunks), self.redact_patterns)
                 if joined_redacted != joined_per_chunk:
                     # Secret spanned across TCP chunk boundary: re-split on SSE event boundaries
                     parts = joined_redacted.split("\n\n")

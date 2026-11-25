@@ -303,7 +303,7 @@ def _cmd_redact(
             if inter.response.stream_chunks is not None and patterns:
                 per_chunk = [redact_text(c, patterns) for c in inter.response.stream_chunks]
                 joined_per_chunk = "".join(per_chunk)
-                joined_redacted = redact_text(joined_per_chunk, patterns)
+                joined_redacted = redact_text("".join(inter.response.stream_chunks), patterns)
                 if joined_redacted != joined_per_chunk:
                     parts = joined_redacted.split("\n\n")
                     new_chunks: tuple[str, ...] | None = tuple(

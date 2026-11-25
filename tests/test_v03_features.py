@@ -887,7 +887,9 @@ def test_rv_review_regressions_p1_and_p2(
         ) as client:
             with client.stream("POST", "https://api.openai.com/v1/chat/completions", json={}) as r:
                 _ = list(r.iter_bytes())
-    assert "sk-split999" not in c_split.read_text(encoding="utf-8")
+    split_text = c_split.read_text(encoding="utf-8")
+    assert "sk-split999" not in split_text
+    assert "it999" not in split_text
 
     # P2 #6: CLI redact invalid regex returns 1 cleanly + dry-run doesn't dirty custom match_on
     assert cli_main(["redact", str(c_field), "--pattern", "[invalid"]) == 1
