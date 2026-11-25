@@ -18,6 +18,7 @@ from llm_tape.models import (
 )
 from llm_tape.pricing import DEFAULT_PRICING, ModelPrice, estimate_cost_usd, load_pricing_file
 from llm_tape.scrubbing import DEFAULT_MATCH_ON, VALID_MATCH_ON, redact_body, redact_text
+from llm_tape.server import TapeReplayServer
 from llm_tape.session import TapeSession, replace_response, tape, use_tape
 from llm_tape.transport import AsyncTapeTransport, TapeTransport
 
@@ -36,6 +37,7 @@ __all__ = [
     "TapeError",
     "TapeMode",
     "TapeNotFoundError",
+    "TapeReplayServer",
     "TapeSession",
     "TapeTransport",
     "ToolCall",
