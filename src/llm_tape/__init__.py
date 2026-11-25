@@ -11,6 +11,7 @@ from llm_tape.chaos import (
     inject_latency,
     truncate_stream,
 )
+from llm_tape.html_report import render_html_report
 from llm_tape.matchers import (
     RequestMatcher,
     match_all,
@@ -59,6 +60,7 @@ from llm_tape.scrubbing import (
     redact_body,
     redact_text,
     resolve_pii_patterns,
+    summarize_json_diff,
 )
 from llm_tape.server import TapeReplayServer
 from llm_tape.session import TapeSession, replace_response, tape, use_tape
@@ -121,8 +123,10 @@ __all__ = [
     "normalize_json_array_order",
     "redact_body",
     "redact_text",
+    "render_html_report",
     "replace_response",
     "resolve_pii_patterns",
+    "summarize_json_diff",
     "tape",
     "truncate_stream",
     "use_tape",
