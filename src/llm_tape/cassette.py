@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import os
 import tempfile
@@ -16,6 +17,7 @@ from llm_tape.models import CorruptCassetteError, Interaction, TapeNotFoundError
 
 SCHEMA_VERSION = 2
 CASSETTE_EXTENSIONS: tuple[str, ...] = (".tape.json", ".tape.json.gz")
+MAX_CASSETTE_BYTES = 100 * 1024 * 1024  # 100 MiB decompression safety cap
 _GZIP_MAGIC = b"\x1f\x8b"
 
 
@@ -27,10 +29,18 @@ def is_cassette_file(path: Path) -> bool:
 
 def iter_cassette_files(directory: Path) -> list[Path]:
     """Return sorted list of .tape.json and .tape.json.gz files under directory."""
-    found: set[Path] = set()
-    for ext in CASSETTE_EXTENSIONS:
-        found.update(directory.rglob(f"*{ext}"))
-    return sorted(found)
+    return sorted(p for p in directory.rglob("*") if is_cassette_file(p))
+
+
+def _decompress_gzip_bounded(raw_bytes: bytes, *, max_bytes: int | None = None) -> bytes:
+    limit = MAX_CASSETTE_BYTES if max_bytes is None else max_bytes
+    with gzip.GzipFile(fileobj=io.BytesIO(raw_bytes), mode="rb") as gz:
+        data = gz.read(limit + 1)
+    if len(data) > limit:
+        raise CorruptCassetteError(
+            f"Decompressed cassette exceeds maximum allowed size ({limit} bytes)."
+        )
+    return data
 
 
 @dataclass
@@ -53,10 +63,12 @@ class Cassette:
         try:
             raw_bytes = cassette_path.read_bytes()
             if cassette_path.suffix.lower() == ".gz" or raw_bytes[:2] == _GZIP_MAGIC:
-                text = gzip.decompress(raw_bytes).decode("utf-8")
+                text = _decompress_gzip_bounded(raw_bytes).decode("utf-8")
             else:
                 text = raw_bytes.decode("utf-8")
             raw = json.loads(text)
+        except CorruptCassetteError:
+            raise
         except (
             OSError,
             gzip.BadGzipFile,

@@ -205,3 +205,27 @@ def test_pytester_tape_compress_option(pytester: pytest.Pytester) -> None:
     result.assert_outcomes(passed=1)
     gz_files = list(pytester.path.rglob("*.tape.json.gz"))
     assert len(gz_files) == 1
+
+
+def test_gzip_bomb_cap_and_case_insensitive_extensions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gzip as gzip_mod
+
+    import llm_tape.cassette as cassette_mod
+    from llm_tape.cli import _cassette_stem
+
+    # Bounded gzip decompression rejects oversized payloads
+    monkeypatch.setattr(cassette_mod, "MAX_CASSETTE_BYTES", 64)
+    bomb_path = tmp_path / "bomb.tape.json.gz"
+    bomb_path.write_bytes(gzip_mod.compress(b"{" + b" " * 200 + b"}", mtime=0))
+    with pytest.raises(CorruptCassetteError, match="maximum allowed size"):
+        Cassette.load(bomb_path)
+
+    # Case-insensitive iter_cassette_files and _cassette_stem
+    upper_dir = tmp_path / "upper"
+    upper_dir.mkdir()
+    upper_gz = upper_dir / "test_case.TAPE.JSON.GZ"
+    upper_gz.write_bytes(b"")
+    assert iter_cassette_files(upper_dir) == [upper_gz]
+    assert _cassette_stem(upper_gz) == "test_case"

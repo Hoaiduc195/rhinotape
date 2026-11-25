@@ -682,8 +682,9 @@ def _discover_test_names(tests_dir: Path) -> set[str]:
 
 def _cassette_stem(path: Path) -> str:
     name = path.name
+    lower = name.lower()
     for suffix in (".tape.json.gz", ".tape.json"):
-        if name.endswith(suffix):
+        if lower.endswith(suffix):
             return name[: -len(suffix)]
     return path.stem
 
