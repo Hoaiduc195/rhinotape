@@ -352,3 +352,133 @@ def test_parse_openai_responses_sse_and_repeated_proxy_tool_name() -> None:
     )
     assert s2.tool_calls[0].name == "search"
     assert s2.tool_calls[0].arguments == {"a": 1}
+
+
+def test_gzip_compressed_sse_stream_record_and_replay(tmp_path: Path) -> None:
+    """P0 regression: gzip-encoded SSE streams must be decompressed when recording."""
+    import gzip
+
+    cassette_path = tmp_path / "gzip_sse.tape.json"
+    raw_sse = "".join(OPENAI_SSE_CHUNKS).encode("utf-8")
+    compressed = gzip.compress(raw_sse)
+    # Split compressed bytes across 2 chunks
+    split_at = len(compressed) // 2
+    gz_chunks = [compressed[:split_at], compressed[split_at:]]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "text/event-stream",
+                "content-encoding": "gzip",
+            },
+            stream=_RawBytesSyncStream(gz_chunks),
+        )
+
+    with tape(cassette_path, mode="once") as session:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            with client.stream(
+                "POST", "https://api.openai.com/v1/chat/completions", json={"stream": True}
+            ) as r:
+                lines = [line for line in r.iter_lines() if line]
+        assert len(lines) == 6
+        assert session.interactions[0].llm.text == "Hello world!"
+        assert session.total_tokens == 100
+        session.assert_tool_called("search")
+
+    # Replay must return clean uncompressed SSE lines without DecodingError
+    with tape(cassette_path, mode="replay") as session:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            with client.stream(
+                "POST", "https://api.openai.com/v1/chat/completions", json={"stream": True}
+            ) as r:
+                replayed = [line for line in r.iter_lines() if line]
+        assert replayed == lines
+        session.assert_tool_called("search")
+
+
+def test_gzip_429_on_client_stream_does_not_raise_decoding_error(tmp_path: Path) -> None:
+    """P1 regression: gzip-encoded 429 JSON error on client.stream() must strip content-encoding."""
+    import gzip
+
+    cassette_path = tmp_path / "gzip_429.tape.json"
+    gz_body = gzip.compress(b'{"error":{"message":"slow down"}}')
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"content-type": "application/json", "content-encoding": "gzip"},
+            content=gz_body,
+        )
+
+    with tape(cassette_path, mode="record") as session:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            with client.stream("POST", "https://api.openai.com/v1/chat/completions", json={}) as r:
+                assert r.status_code == 429
+                r.read()
+                assert r.json() == {"error": {"message": "slow down"}}
+        session.assert_call_count(1)
+
+
+def test_non_stream_post_receiving_sse_records_and_replays_cleanly(tmp_path: Path) -> None:
+    """P1 regression: client.post() (stream=False) receiving SSE must record & replay resp.text."""
+    cassette_path = tmp_path / "post_sse.tape.json"
+    raw_sse = "".join(OPENAI_SSE_CHUNKS).encode("utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=raw_sse,
+        )
+
+    with tape(cassette_path, mode="once") as session:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            resp = client.post("https://api.openai.com/v1/chat/completions", json={"stream": True})
+            assert "Hello " in resp.text
+        session.assert_call_count(1)
+        assert session.interactions[0].llm.text == "Hello world!"
+
+    with tape(cassette_path, mode="replay") as session:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            resp = client.post("https://api.openai.com/v1/chat/completions", json={"stream": True})
+            assert "Hello " in resp.text
+        session.assert_call_count(1)
+
+
+def test_reused_httpx_request_object_not_bypassed_and_prepare_failure_resets_active(
+    tmp_path: Path,
+) -> None:
+    """P2 regressions: reused httpx.Request never bypasses replay; failed _prepare resets active."""
+    from llm_tape import TapeNotFoundError, TapeSession
+
+    cassette_path = tmp_path / "reuse.tape.json"
+    hits = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal hits
+        hits += 1
+        return httpx.Response(200, json={"ok": hits})
+
+    req = httpx.Request("POST", "https://api.openai.com/v1/chat/completions", json={"a": 1})
+    with tape(cassette_path, mode="record"):
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            client.send(req)
+            client.send(req)
+    assert hits == 2
+
+    with tape(cassette_path, mode="replay") as session:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            r1 = client.send(req)
+            r2 = client.send(req)
+            assert r1.json() == {"ok": 1}
+            assert r2.json() == {"ok": 2}
+        session.assert_call_count(2)
+    assert hits == 2
+
+    # Failed Cassette.load() in _prepare must reset _active=False
+    s = TapeSession(tmp_path / "does_not_exist.tape.json", mode="replay")
+    with pytest.raises(TapeNotFoundError):
+        with s:
+            pass
+    assert s._active is False

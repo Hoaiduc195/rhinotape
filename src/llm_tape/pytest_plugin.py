@@ -6,6 +6,7 @@ import hashlib
 import re
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -14,6 +15,7 @@ from llm_tape.session import TapeSession
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _MAX_STEM_LEN = 120
+_FAILED_ATTR = "_llm_tape_call_failed"
 
 
 def _sanitize_segment(name: str, *, unique_seed: str | None = None) -> str:
@@ -47,9 +49,20 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
         "markers",
-        "tape(name=None, mode=None, ignore_localhost=False, ignore_hosts=(), ignore_fields=()): "
-        "configure cassette options for the llm_tape fixture.",
+        "tape(name=None, mode=None, ignore_localhost=False, ignore_hosts=(), "
+        "ignore_fields=(), ignore_query_params=(), allow_playback_repeats=False, "
+        "save_on_error=False): configure cassette options for the llm_tape fixture.",
     )
+
+
+@pytest.hookimpl(tryfirst=True, hookwrapper=True)
+def pytest_runtest_makereport(
+    item: pytest.Item, call: pytest.CallInfo[Any]
+) -> Generator[None, Any, None]:
+    outcome = yield
+    rep = outcome.get_result()
+    if rep.when == "call":
+        setattr(item, _FAILED_ATTR, bool(rep.failed))
 
 
 @pytest.fixture
@@ -80,20 +93,33 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
         base_dir = test_path.parent / "tapes"
         file_slug = _sanitize_segment(test_path.stem, unique_seed=str(test_path))
 
-    # Avoid parametrized tests colliding when a fixed marker name is given
-    raw_test_name = str(marker_name) if marker_name else request.node.name
-    if marker_name and "[" in request.node.name:
-        param_suffix = request.node.name[request.node.name.index("[") :]
-        raw_test_name = f"{marker_name}{param_suffix}"
+    # Include class name when no explicit marker name is set to avoid TestA.test_x vs TestB.test_x
+    if marker_name:
+        raw_test_name = str(marker_name)
+        if "[" in request.node.name:
+            param_suffix = request.node.name[request.node.name.index("[") :]
+            raw_test_name = f"{marker_name}{param_suffix}"
+    elif request.cls is not None:
+        raw_test_name = f"{request.cls.__name__}__{request.node.name}"
+    else:
+        raw_test_name = request.node.name
 
     test_slug = _sanitize_segment(raw_test_name, unique_seed=request.node.nodeid)
     cassette_path = base_dir / file_slug / f"{test_slug}.tape.json"
 
-    with TapeSession(
+    session = TapeSession(
         cassette_path,
         mode=mode,
         ignore_localhost=bool(marker_kwargs.get("ignore_localhost", False)),
         ignore_hosts=marker_kwargs.get("ignore_hosts", ()),
         ignore_fields=marker_kwargs.get("ignore_fields", ()),
-    ) as session:
+        ignore_query_params=marker_kwargs.get("ignore_query_params", ()),
+        allow_playback_repeats=bool(marker_kwargs.get("allow_playback_repeats", False)),
+        save_on_error=bool(marker_kwargs.get("save_on_error", False)),
+    )
+    session.__enter__()
+    try:
         yield session
+    finally:
+        test_failed = bool(getattr(request.node, _FAILED_ATTR, False))
+        session._finalize(exc_occurred=test_failed)

@@ -251,8 +251,8 @@ def parse_sse_events(raw_sse: str) -> list[tuple[str | None, Any]]:
                     except json.JSONDecodeError:
                         parsed = raw_data
                     events.append((current_event, parsed))
-                current_event = None
                 data_lines = []
+            current_event = None
             continue
         if line.startswith(":"):
             continue
@@ -504,11 +504,7 @@ def parse_llm_interaction(
     content_type: str = "",
 ) -> LLMCallSummary:
     """Extract normalized LLM metadata from a JSON or SSE streaming HTTP interaction."""
-    is_sse = (
-        stream_chunks is not None
-        or "text/event-stream" in content_type.lower()
-        or (isinstance(response_body, str) and "data:" in response_body)
-    )
+    is_sse = stream_chunks is not None or "text/event-stream" in content_type.lower()
     if is_sse:
         raw_sse = "".join(stream_chunks) if stream_chunks is not None else str(response_body or "")
         events = parse_sse_events(raw_sse)

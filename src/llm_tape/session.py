@@ -9,6 +9,7 @@ import functools
 import inspect
 import threading
 import time
+import zlib
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from pathlib import Path
@@ -53,20 +54,22 @@ _active_session: contextvars.ContextVar[TapeSession | None] = contextvars.Contex
 )
 _patch_lock = threading.Lock()
 _patch_refcount = 0
-_orig_sync_send: Any = None
-_orig_async_send: Any = None
+_orig_sync_send: Any = httpx.Client.send
+_orig_async_send: Any = httpx.AsyncClient.send
 
 
 def _dispatched_sync_send(
     client: httpx.Client, request: httpx.Request, *args: Any, **kwargs: Any
 ) -> httpx.Response:
+    with _patch_lock:
+        orig = _orig_sync_send
     session = _active_session.get()
     if session is None:
-        return _orig_sync_send(client, request, *args, **kwargs)  # type: ignore[no-any-return]
+        return orig(client, request, *args, **kwargs)  # type: ignore[no-any-return]
     stream = bool(kwargs.get("stream", False))
     return session.handle_sync(
         request,
-        lambda req: _orig_sync_send(client, req, *args, **kwargs),
+        lambda req: orig(client, req, *args, **kwargs),
         stream=stream,
     )
 
@@ -74,13 +77,15 @@ def _dispatched_sync_send(
 async def _dispatched_async_send(
     client: httpx.AsyncClient, request: httpx.Request, *args: Any, **kwargs: Any
 ) -> httpx.Response:
+    with _patch_lock:
+        orig = _orig_async_send
     session = _active_session.get()
     if session is None:
-        return await _orig_async_send(client, request, *args, **kwargs)  # type: ignore[no-any-return]
+        return await orig(client, request, *args, **kwargs)  # type: ignore[no-any-return]
     stream = bool(kwargs.get("stream", False))
     return await session.handle_async(
         request,
-        lambda req: _orig_async_send(client, req, *args, **kwargs),
+        lambda req: orig(client, req, *args, **kwargs),
         stream=stream,
     )
 
@@ -97,20 +102,54 @@ def _acquire_httpx_patch() -> None:
 
 
 def _release_httpx_patch() -> None:
-    global _patch_refcount, _orig_sync_send, _orig_async_send
+    global _patch_refcount
     with _patch_lock:
         if _patch_refcount > 0:
             _patch_refcount -= 1
             if _patch_refcount == 0:
-                if _orig_sync_send is not None:
-                    httpx.Client.send = _orig_sync_send  # type: ignore[method-assign]
-                    _orig_sync_send = None
-                if _orig_async_send is not None:
-                    httpx.AsyncClient.send = _orig_async_send  # type: ignore[method-assign]
-                    _orig_async_send = None
+                httpx.Client.send = _orig_sync_send  # type: ignore[method-assign]
+                httpx.AsyncClient.send = _orig_async_send  # type: ignore[method-assign]
 
 
-# --- Streaming ByteStream wrappers -----------------------------------------
+# --- Streaming Content Decompression & ByteStream wrappers -----------------
+
+
+class _StreamContentDecoder:
+    """Incrementally decompresses gzip/deflate/br/zstd stream chunks for recording."""
+
+    def __init__(self, content_encoding: str) -> None:
+        enc = content_encoding.strip().lower()
+        self._mode = "identity"
+        self._zlib_obj: Any = None
+        self._brotli_obj: Any = None
+        if enc in {"gzip", "x-gzip"}:
+            self._mode = "zlib"
+            self._zlib_obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
+        elif enc == "deflate":
+            self._mode = "zlib"
+            self._zlib_obj = zlib.decompressobj(zlib.MAX_WBITS | 32)
+        elif enc == "br":
+            try:
+                import brotli  # type: ignore[import-not-found]
+
+                self._mode = "brotli"
+                self._brotli_obj = brotli.Decompressor()
+            except ImportError:
+                self._mode = "identity"
+
+    def decompress(self, chunk: bytes) -> bytes:
+        if not chunk or self._mode == "identity":
+            return chunk
+        if self._mode == "zlib":
+            return bytes(self._zlib_obj.decompress(chunk))
+        if self._mode == "brotli":
+            return bytes(self._brotli_obj.process(chunk))
+        return chunk
+
+    def flush(self) -> bytes:
+        if self._mode == "zlib":
+            return bytes(self._zlib_obj.flush())
+        return b""
 
 
 class _ReplayByteStream(httpx.SyncByteStream, httpx.AsyncByteStream):
@@ -143,27 +182,32 @@ class _ReplayRawBytesStream(httpx.SyncByteStream, httpx.AsyncByteStream):
 
 
 class _RecordingSyncStream(httpx.SyncByteStream):
-    """Wraps a live sync stream, decoding incrementally and committing only on EOF."""
+    """Wraps a live sync stream, decompressing & decoding incrementally and committing on EOF."""
 
     def __init__(
         self,
         upstream_stream: httpx.SyncByteStream,
         on_complete: Callable[[list[str]], None],
+        *,
+        content_encoding: str = "",
     ) -> None:
         self._upstream = upstream_stream
         self._on_complete = on_complete
-        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._content_decoder = _StreamContentDecoder(content_encoding)
+        self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._chunks: list[str] = []
         self._reached_eof = False
         self._committed = False
 
     def __iter__(self) -> Iterator[bytes]:
         for chunk in self._upstream:
-            text = self._decoder.decode(chunk, final=False)
+            decoded_bytes = self._content_decoder.decompress(chunk)
+            text = self._utf8_decoder.decode(decoded_bytes, final=False)
             if text:
                 self._chunks.append(text)
             yield chunk
-        tail = self._decoder.decode(b"", final=True)
+        flushed = self._content_decoder.flush()
+        tail = self._utf8_decoder.decode(flushed, final=True)
         if tail:
             self._chunks.append(tail)
         self._reached_eof = True
@@ -183,27 +227,32 @@ class _RecordingSyncStream(httpx.SyncByteStream):
 
 
 class _RecordingAsyncStream(httpx.AsyncByteStream):
-    """Wraps a live async stream, decoding incrementally and committing only on EOF."""
+    """Wraps a live async stream, decompressing & decoding incrementally and committing on EOF."""
 
     def __init__(
         self,
         upstream_stream: httpx.AsyncByteStream,
         on_complete: Callable[[list[str]], None],
+        *,
+        content_encoding: str = "",
     ) -> None:
         self._upstream = upstream_stream
         self._on_complete = on_complete
-        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._content_decoder = _StreamContentDecoder(content_encoding)
+        self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._chunks: list[str] = []
         self._reached_eof = False
         self._committed = False
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         async for chunk in self._upstream:
-            text = self._decoder.decode(chunk, final=False)
+            decoded_bytes = self._content_decoder.decompress(chunk)
+            text = self._utf8_decoder.decode(decoded_bytes, final=False)
             if text:
                 self._chunks.append(text)
             yield chunk
-        tail = self._decoder.decode(b"", final=True)
+        flushed = self._content_decoder.flush()
+        tail = self._utf8_decoder.decode(flushed, final=True)
         if tail:
             self._chunks.append(tail)
         self._reached_eof = True
@@ -277,35 +326,39 @@ class TapeSession:
         if self._active:
             raise TapeError("TapeSession is already active and cannot be re-entered concurrently.")
         self._active = True
-        with self._lock:
-            self._interactions.clear()
-            self._recorded.clear()
-            self._replay_queues.clear()
-            self._known_fingerprints.clear()
-            self._all_loaded_requests.clear()
+        try:
+            with self._lock:
+                self._interactions.clear()
+                self._recorded.clear()
+                self._replay_queues.clear()
+                self._known_fingerprints.clear()
+                self._all_loaded_requests.clear()
 
-        if self.mode is TapeMode.NONE:
-            self._is_replaying = False
-            self._is_recording = False
-            return
+            if self.mode is TapeMode.NONE:
+                self._is_replaying = False
+                self._is_recording = False
+                return
 
-        if self.mode is TapeMode.REPLAY:
-            cassette = Cassette.load(self.cassette_path)
-            self._load_replay_queues(cassette)
-            self._is_replaying = True
-            self._is_recording = False
-        elif self.mode is TapeMode.RECORD:
-            self._is_replaying = False
-            self._is_recording = True
-        elif self.mode is TapeMode.ONCE:
-            if self.cassette_path.exists():
+            if self.mode is TapeMode.REPLAY:
                 cassette = Cassette.load(self.cassette_path)
                 self._load_replay_queues(cassette)
                 self._is_replaying = True
                 self._is_recording = False
-            else:
+            elif self.mode is TapeMode.RECORD:
                 self._is_replaying = False
                 self._is_recording = True
+            elif self.mode is TapeMode.ONCE:
+                if self.cassette_path.exists():
+                    cassette = Cassette.load(self.cassette_path)
+                    self._load_replay_queues(cassette)
+                    self._is_replaying = True
+                    self._is_recording = False
+                else:
+                    self._is_replaying = False
+                    self._is_recording = True
+        except Exception:
+            self._active = False
+            raise
 
     def _load_replay_queues(self, cassette: Cassette) -> None:
         with self._lock:
@@ -338,7 +391,6 @@ class TapeSession:
                 try:
                     _active_session.reset(self._ctx_token)
                 except ValueError:
-                    # Context mismatch (e.g. async generator finalized in another task)
                     pass
                 self._ctx_token = None
 
@@ -420,7 +472,11 @@ class TapeSession:
         )
 
     def _replay_response(
-        self, request: httpx.Request, recorded_req: RecordedRequest
+        self,
+        request: httpx.Request,
+        recorded_req: RecordedRequest,
+        *,
+        stream: bool = False,
     ) -> httpx.Response:
         with self._lock:
             queue = self._replay_queues.get(recorded_req.fingerprint)
@@ -456,10 +512,18 @@ class TapeSession:
             if k.lower() not in _STRIP_REPLAY_HEADERS
         }
         if interaction.response.stream_chunks is not None:
+            if stream:
+                return httpx.Response(
+                    status_code=interaction.response.status_code,
+                    headers=replay_headers,
+                    stream=_ReplayByteStream(interaction.response.stream_chunks),
+                    request=request,
+                )
+            joined = "".join(interaction.response.stream_chunks).encode("utf-8")
             return httpx.Response(
                 status_code=interaction.response.status_code,
                 headers=replay_headers,
-                stream=_ReplayByteStream(interaction.response.stream_chunks),
+                content=joined,
                 request=request,
             )
         return httpx.Response(
@@ -540,44 +604,62 @@ class TapeSession:
             return sender(request)
 
         request.extensions[_HANDLED_EXT_KEY] = True
-        body_bytes = request.read()
-        recorded_req = self._build_recorded_request(request, body_bytes)
+        try:
+            body_bytes = request.read()
+            recorded_req = self._build_recorded_request(request, body_bytes)
 
-        if self._is_replaying:
-            return self._replay_response(request, recorded_req)
+            if self._is_replaying:
+                return self._replay_response(request, recorded_req, stream=stream)
 
-        start = time.perf_counter()
-        response = sender(request)
-        content_type = response.headers.get("content-type", "").lower()
-        is_sse = "text/event-stream" in content_type
-        should_wrap_stream = (is_sse or (stream and response.status_code < 400)) and isinstance(
-            response.stream, httpx.SyncByteStream
-        )
-
-        if should_wrap_stream:
-
-            def _on_complete(chunks: list[str]) -> None:
-                latency_ms = (time.perf_counter() - start) * 1000.0
-                self._record_interaction(
-                    recorded_req, response, None, latency_ms, stream_chunks=chunks
-                )
-
-            assert isinstance(response.stream, httpx.SyncByteStream)
-            response.stream = _RecordingSyncStream(response.stream, _on_complete)
-            return response
-
-        response_bytes = response.read()
-        latency_ms = (time.perf_counter() - start) * 1000.0
-        self._record_interaction(recorded_req, response, response_bytes, latency_ms)
-        if stream:
-            # Preserve readable stream interface for 4xx/5xx error responses on client.stream()
-            return httpx.Response(
-                status_code=response.status_code,
-                headers=response.headers,
-                stream=_ReplayRawBytesStream(response_bytes),
-                request=request,
+            start = time.perf_counter()
+            response = sender(request)
+            content_type = response.headers.get("content-type", "").lower()
+            is_sse = "text/event-stream" in content_type
+            should_wrap_stream = (
+                not response.is_stream_consumed
+                and (is_sse or (stream and response.status_code < 400))
+                and isinstance(response.stream, httpx.SyncByteStream)
             )
-        return response
+
+            if should_wrap_stream:
+                content_encoding = response.headers.get("content-encoding", "")
+
+                def _on_complete(chunks: list[str]) -> None:
+                    latency_ms = (time.perf_counter() - start) * 1000.0
+                    self._record_interaction(
+                        recorded_req, response, None, latency_ms, stream_chunks=chunks
+                    )
+
+                assert isinstance(response.stream, httpx.SyncByteStream)
+                response.stream = _RecordingSyncStream(
+                    response.stream, _on_complete, content_encoding=content_encoding
+                )
+                return response
+
+            response_bytes = response.content if response.is_stream_consumed else response.read()
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            if is_sse:
+                text_chunk = response_bytes.decode("utf-8", errors="replace")
+                self._record_interaction(
+                    recorded_req, response, None, latency_ms, stream_chunks=[text_chunk]
+                )
+            else:
+                self._record_interaction(recorded_req, response, response_bytes, latency_ms)
+            if stream:
+                cleaned_headers = {
+                    k: v
+                    for k, v in response.headers.items()
+                    if k.lower() not in _STRIP_REPLAY_HEADERS
+                }
+                return httpx.Response(
+                    status_code=response.status_code,
+                    headers=cleaned_headers,
+                    stream=_ReplayRawBytesStream(response_bytes),
+                    request=request,
+                )
+            return response
+        finally:
+            request.extensions.pop(_HANDLED_EXT_KEY, None)
 
     async def handle_async(
         self,
@@ -592,43 +674,64 @@ class TapeSession:
             return await sender(request)  # type: ignore[no-any-return]
 
         request.extensions[_HANDLED_EXT_KEY] = True
-        body_bytes = await request.aread()
-        recorded_req = self._build_recorded_request(request, body_bytes)
+        try:
+            body_bytes = await request.aread()
+            recorded_req = self._build_recorded_request(request, body_bytes)
 
-        if self._is_replaying:
-            return self._replay_response(request, recorded_req)
+            if self._is_replaying:
+                return self._replay_response(request, recorded_req, stream=stream)
 
-        start = time.perf_counter()
-        response: httpx.Response = await sender(request)
-        content_type = response.headers.get("content-type", "").lower()
-        is_sse = "text/event-stream" in content_type
-        should_wrap_stream = (is_sse or (stream and response.status_code < 400)) and isinstance(
-            response.stream, httpx.AsyncByteStream
-        )
-
-        if should_wrap_stream:
-
-            def _on_complete(chunks: list[str]) -> None:
-                latency_ms = (time.perf_counter() - start) * 1000.0
-                self._record_interaction(
-                    recorded_req, response, None, latency_ms, stream_chunks=chunks
-                )
-
-            assert isinstance(response.stream, httpx.AsyncByteStream)
-            response.stream = _RecordingAsyncStream(response.stream, _on_complete)
-            return response
-
-        response_bytes = await response.aread()
-        latency_ms = (time.perf_counter() - start) * 1000.0
-        self._record_interaction(recorded_req, response, response_bytes, latency_ms)
-        if stream:
-            return httpx.Response(
-                status_code=response.status_code,
-                headers=response.headers,
-                stream=_ReplayRawBytesStream(response_bytes),
-                request=request,
+            start = time.perf_counter()
+            response: httpx.Response = await sender(request)
+            content_type = response.headers.get("content-type", "").lower()
+            is_sse = "text/event-stream" in content_type
+            should_wrap_stream = (
+                not response.is_stream_consumed
+                and (is_sse or (stream and response.status_code < 400))
+                and isinstance(response.stream, httpx.AsyncByteStream)
             )
-        return response
+
+            if should_wrap_stream:
+                content_encoding = response.headers.get("content-encoding", "")
+
+                def _on_complete(chunks: list[str]) -> None:
+                    latency_ms = (time.perf_counter() - start) * 1000.0
+                    self._record_interaction(
+                        recorded_req, response, None, latency_ms, stream_chunks=chunks
+                    )
+
+                assert isinstance(response.stream, httpx.AsyncByteStream)
+                response.stream = _RecordingAsyncStream(
+                    response.stream, _on_complete, content_encoding=content_encoding
+                )
+                return response
+
+            response_bytes = (
+                response.content if response.is_stream_consumed else await response.aread()
+            )
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            if is_sse:
+                text_chunk = response_bytes.decode("utf-8", errors="replace")
+                self._record_interaction(
+                    recorded_req, response, None, latency_ms, stream_chunks=[text_chunk]
+                )
+            else:
+                self._record_interaction(recorded_req, response, response_bytes, latency_ms)
+            if stream:
+                cleaned_headers = {
+                    k: v
+                    for k, v in response.headers.items()
+                    if k.lower() not in _STRIP_REPLAY_HEADERS
+                }
+                return httpx.Response(
+                    status_code=response.status_code,
+                    headers=cleaned_headers,
+                    stream=_ReplayRawBytesStream(response_bytes),
+                    request=request,
+                )
+            return response
+        finally:
+            request.extensions.pop(_HANDLED_EXT_KEY, None)
 
     # --- Inspection properties ---------------------------------------------
 
