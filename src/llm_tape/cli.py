@@ -1530,6 +1530,78 @@ def _cmd_pricing(*, prefix: str | None = None, as_json: bool = False) -> int:
     return 0
 
 
+def _cmd_search(
+    directory: Path,
+    *,
+    model: str | None = None,
+    provider: str | None = None,
+    tool: str | None = None,
+    text: str | None = None,
+    min_cost: float | None = None,
+    status: int | None = None,
+    as_json: bool = False,
+) -> int:
+    """Search interactions across all cassettes under a file or directory."""
+    if not directory.exists():
+        print(f"Error: path not found: {directory}", file=sys.stderr)
+        return 1
+    files = [directory] if directory.is_file() else iter_cassette_files(directory)
+    model_q = model.lower() if model else None
+    provider_q = provider.lower() if provider else None
+    tool_q = tool.lower() if tool else None
+    text_q = text.lower() if text else None
+
+    matches: list[dict[str, Any]] = []
+    for file_path in files:
+        try:
+            cassette = Cassette.load(file_path)
+        except CorruptCassetteError:
+            continue
+        rel = str(file_path.relative_to(directory)) if directory.is_dir() else file_path.name
+        for idx, inter in enumerate(cassette.interactions, start=1):
+            if model_q and model_q not in (inter.llm.model or "").lower():
+                continue
+            if provider_q and provider_q != inter.llm.provider.lower():
+                continue
+            if tool_q and not any(tool_q in tc.name.lower() for tc in inter.llm.tool_calls):
+                continue
+            if text_q and text_q not in inter.llm.text.lower():
+                continue
+            if min_cost is not None and inter.llm.estimated_cost_usd < min_cost:
+                continue
+            if status is not None and inter.response.status_code != status:
+                continue
+            matches.append(
+                {
+                    "cassette": rel,
+                    "index": idx,
+                    "provider": inter.llm.provider,
+                    "model": inter.llm.model,
+                    "status_code": inter.response.status_code,
+                    "tokens": inter.llm.usage.total_tokens,
+                    "estimated_cost_usd": inter.llm.estimated_cost_usd,
+                    "tools": [tc.name for tc in inter.llm.tool_calls],
+                    "text_preview": inter.llm.text[:80],
+                }
+            )
+
+    if as_json:
+        print(json.dumps({"matches": matches, "count": len(matches)}, indent=2))
+        return 0
+    if not matches:
+        print("No matching interactions found.")
+        return 0
+    for m in matches:
+        tools_s = ",".join(m["tools"]) or "-"
+        print(
+            f"{m['cassette']}[{m['index']}] {m['provider']}/{m['model'] or '-'} "
+            f"status={m['status_code']} tok={m['tokens']} "
+            f"cost=${m['estimated_cost_usd']:.6f} tools=[{tools_s}]"
+        )
+    print(f"\nFound {len(matches)} matching interaction(s).")
+    return 0
+
+
 def _cmd_schema(*, output: Path | None = None) -> int:
     """Output the Draft 2020-12 JSON Schema for .tape.json cassettes."""
     rendered = json.dumps(cassette_json_schema(), indent=2, ensure_ascii=False) + "\n"
@@ -1991,6 +2063,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_pricing.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
 
+    p_search = sub.add_parser(
+        "search",
+        help="Search recorded interactions by model, provider, tool, text, cost, or HTTP status.",
+    )
+    p_search.add_argument("directory", type=Path, nargs="?", default=Path("."))
+    p_search.add_argument("--model", default=None, help="Filter by model substring.")
+    p_search.add_argument("--provider", default=None, help="Filter by provider name.")
+    p_search.add_argument("--tool", default=None, help="Filter by tool name substring.")
+    p_search.add_argument("--text", default=None, help="Filter by response text substring.")
+    p_search.add_argument("--min-cost", type=float, default=None, dest="min_cost")
+    p_search.add_argument("--status", type=int, default=None, help="Filter by HTTP status code.")
+    p_search.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
+
     return parser
 
 
@@ -2075,6 +2160,17 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "pricing":
             return _cmd_pricing(prefix=args.prefix, as_json=args.as_json)
+        if args.command == "search":
+            return _cmd_search(
+                args.directory,
+                model=args.model,
+                provider=args.provider,
+                tool=args.tool,
+                text=args.text,
+                min_cost=args.min_cost,
+                status=args.status,
+                as_json=args.as_json,
+            )
     except (TapeError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
