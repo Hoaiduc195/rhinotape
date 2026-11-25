@@ -2,6 +2,16 @@
 
 from llm_tape._version import __version__
 from llm_tape.cassette import Cassette
+from llm_tape.matchers import (
+    RequestMatcher,
+    match_all,
+    match_any,
+    match_header_equals,
+    match_json_regex,
+    match_json_subset,
+    match_method,
+    match_path,
+)
 from llm_tape.models import (
     CorruptCassetteError,
     Interaction,
@@ -36,6 +46,7 @@ from llm_tape.scrubbing import (
     PII_PRESETS,
     PII_SSN,
     VALID_MATCH_ON,
+    normalize_json_array_order,
     redact_body,
     redact_text,
     resolve_pii_patterns,
@@ -65,6 +76,7 @@ __all__ = [
     "PII_SSN",
     "RecordedRequest",
     "RecordedResponse",
+    "RequestMatcher",
     "TapeAssertionError",
     "TapeError",
     "TapeMode",
@@ -80,6 +92,14 @@ __all__ = [
     "estimate_cache_savings_usd",
     "estimate_cost_usd",
     "load_pricing_file",
+    "match_all",
+    "match_any",
+    "match_header_equals",
+    "match_json_regex",
+    "match_json_subset",
+    "match_method",
+    "match_path",
+    "normalize_json_array_order",
     "redact_body",
     "redact_text",
     "replace_response",
