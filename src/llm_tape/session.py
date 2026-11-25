@@ -437,6 +437,7 @@ class TapeSession:
         custom_matcher: Callable[[RecordedRequest, RecordedRequest], bool] | None = None,
         on_replay: Callable[[Interaction, int], Interaction | None] | None = None,
         on_record: Callable[[Interaction], Interaction | None] | None = None,
+        metadata: dict[str, Any] | None = None,
         replay_latency_scale: float = 0.0,
         allow_playback_repeats: bool = False,
         save_on_error: bool = False,
@@ -476,6 +477,7 @@ class TapeSession:
         self.custom_matcher = custom_matcher
         self.on_replay = on_replay
         self.on_record = on_record
+        self.metadata: dict[str, Any] = dict(metadata) if metadata else {}
         self.replay_latency_scale = float(replay_latency_scale)
         self.allow_playback_repeats = allow_playback_repeats
         self.save_on_error = save_on_error
@@ -655,9 +657,9 @@ class TapeSession:
                 else recorded_copy
             )
             merged_meta = (
-                {**existing_meta_copy, "llm_tape_version": __version__}
+                {**existing_meta_copy, **self.metadata, "llm_tape_version": __version__}
                 if self.mode is TapeMode.NEW_EPISODES
-                else {"llm_tape_version": __version__}
+                else {**self.metadata, "llm_tape_version": __version__}
             )
             cassette = Cassette(
                 path=self.cassette_path,
@@ -1613,6 +1615,7 @@ def tape(
     custom_matcher: Callable[[RecordedRequest, RecordedRequest], bool] | None = None,
     on_replay: Callable[[Interaction, int], Interaction | None] | None = None,
     on_record: Callable[[Interaction], Interaction | None] | None = None,
+    metadata: dict[str, Any] | None = None,
     replay_latency_scale: float = 0.0,
     allow_playback_repeats: bool = False,
     save_on_error: bool = False,
@@ -1644,6 +1647,7 @@ def tape(
         custom_matcher=custom_matcher,
         on_replay=on_replay,
         on_record=on_record,
+        metadata=metadata,
         replay_latency_scale=replay_latency_scale,
         allow_playback_repeats=allow_playback_repeats,
         save_on_error=save_on_error,
