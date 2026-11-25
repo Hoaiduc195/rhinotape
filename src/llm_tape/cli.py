@@ -1762,6 +1762,67 @@ def _cmd_reparse(target: Path, *, dry_run: bool = False) -> int:
     return 0
 
 
+def _cmd_list(
+    directory: Path,
+    *,
+    sort_by: str = "cost",
+    limit: int | None = None,
+    as_json: bool = False,
+) -> int:
+    """List cassettes sorted by cost, tokens, calls, latency, or name."""
+    if not directory.exists():
+        print(f"Error: path not found: {directory}", file=sys.stderr)
+        return 1
+    if limit is not None and limit < 0:
+        print("Error: --limit must be >= 0.", file=sys.stderr)
+        return 1
+
+    files = [directory] if directory.is_file() else iter_cassette_files(directory)
+    rows: list[dict[str, Any]] = []
+    for file_path in files:
+        try:
+            cassette = Cassette.load(file_path)
+        except CorruptCassetteError:
+            continue
+        s = _cassette_stats(cassette)
+        s["relative_path"] = (
+            str(file_path.relative_to(directory)) if directory.is_dir() else file_path.name
+        )
+        rows.append(s)
+
+    if sort_by == "name":
+        rows.sort(key=lambda r: str(r["relative_path"]))
+    elif sort_by == "tokens":
+        rows.sort(key=lambda r: (-int(r["total_tokens"]), str(r["relative_path"])))
+    elif sort_by == "calls":
+        rows.sort(key=lambda r: (-int(r["calls"]), str(r["relative_path"])))
+    elif sort_by == "latency":
+        rows.sort(key=lambda r: (-float(r["latency_ms"]), str(r["relative_path"])))
+    else:
+        rows.sort(key=lambda r: (-float(r["estimated_cost_usd"]), str(r["relative_path"])))
+
+    if limit is not None:
+        rows = rows[:limit]
+
+    if as_json:
+        print(json.dumps({"cassettes": rows, "count": len(rows)}, indent=2))
+        return 0
+    if not rows:
+        print(f"No .tape.json cassettes found in {directory}")
+        return 0
+    print(f"{'Cassette':<48} {'Calls':>5} {'Tokens':>9} {'Cost':>11} {'Latency':>9}")
+    print("-" * 86)
+    for r in rows:
+        name = str(r["relative_path"])
+        if len(name) > 48:
+            name = "..." + name[-45:]
+        print(
+            f"{name:<48} {r['calls']:>5} {r['total_tokens']:>9} "
+            f"${r['estimated_cost_usd']:>10.6f} {r['latency_ms']:>7.1f}ms"
+        )
+    return 0
+
+
 def _cmd_schema(*, output: Path | None = None) -> int:
     """Output the Draft 2020-12 JSON Schema for .tape.json cassettes."""
     rendered = json.dumps(cassette_json_schema(), indent=2, ensure_ascii=False) + "\n"
@@ -2254,6 +2315,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Report cassettes that would change without saving.",
     )
 
+    p_list = sub.add_parser(
+        "list",
+        help="List cassettes sorted by cost, tokens, calls, latency, or name.",
+    )
+    p_list.add_argument("directory", type=Path, nargs="?", default=Path("."))
+    p_list.add_argument(
+        "--sort",
+        dest="sort_by",
+        choices=["cost", "tokens", "calls", "latency", "name"],
+        default="cost",
+        help="Sort order (default: cost descending).",
+    )
+    p_list.add_argument("--limit", type=int, default=None, help="Maximum number of rows to show.")
+    p_list.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
+
     return parser
 
 
@@ -2353,6 +2429,13 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_replay_check(args.target, as_json=args.as_json)
         if args.command == "reparse":
             return _cmd_reparse(args.target, dry_run=args.dry_run)
+        if args.command == "list":
+            return _cmd_list(
+                args.directory,
+                sort_by=args.sort_by,
+                limit=args.limit,
+                as_json=args.as_json,
+            )
     except (TapeError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
