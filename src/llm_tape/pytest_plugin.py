@@ -186,9 +186,32 @@ def _write_json_report_atomic(path: Path, payload: dict[str, Any]) -> None:
                 pass
 
 
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node: Any, error: Any) -> None:
+    """Aggregate llm-tape report entries from pytest-xdist workers on the controller."""
+    del error
+    workeroutput = getattr(node, "workeroutput", None)
+    if not isinstance(workeroutput, dict):
+        return
+    worker_entries = workeroutput.get("llm_tape_entries")
+    if isinstance(worker_entries, list):
+        config = getattr(node, "config", None)
+        if config is not None:
+            entries = config.stash.get(_REPORT_KEY, None)
+            if entries is not None:
+                entries.extend(worker_entries)
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     del exitstatus
     entries = session.config.stash.get(_REPORT_KEY, [])
+    if hasattr(session.config, "workerinput"):
+        # Running inside a pytest-xdist worker: forward entries to controller
+        workeroutput = getattr(session.config, "workeroutput", None)
+        if isinstance(workeroutput, dict):
+            workeroutput["llm_tape_entries"] = entries
+        return
+
     totals = _compute_report_totals(entries)
 
     violations: list[str] = []

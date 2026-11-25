@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -121,3 +122,89 @@ def test_pytester_report_json_and_budget_gates(pytester: pytest.Pytester) -> Non
     assert res_bad_cost.ret == pytest.ExitCode.USAGE_ERROR
     res_bad_tokens = pytester.runpytest("--tape-max-tokens=-1")
     assert res_bad_tokens.ret == pytest.ExitCode.USAGE_ERROR
+
+
+def test_xdist_worker_and_controller_aggregation(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from llm_tape.pytest_plugin import (
+        _REPORT_KEY,
+        _VIOLATIONS_KEY,
+        pytest_sessionfinish,
+        pytest_testnodedown,
+    )
+
+    json_report = tmp_path / "xdist-report.json"
+
+    def _make_config(*, is_worker: bool, max_tokens: int | None) -> Any:
+        stash = pytest.Stash()
+        stash[_REPORT_KEY] = []
+        stash[_VIOLATIONS_KEY] = []
+        opts = {
+            "--tape-max-tokens": max_tokens,
+            "--tape-max-cost": None,
+            "--tape-json-report": str(json_report),
+        }
+        cfg = SimpleNamespace(
+            stash=stash,
+            getoption=lambda name, default=None: opts.get(name, default),
+        )
+        if is_worker:
+            cfg.workerinput = {"workerid": "gw0"}
+            cfg.workeroutput = {}
+        return cfg
+
+    # Worker 1 & Worker 2 each stay under 500 tokens individually (300 each)
+    w1_cfg = _make_config(is_worker=True, max_tokens=500)
+    w1_cfg.stash[_REPORT_KEY].append(
+        {
+            "nodeid": "test_a.py::test_1",
+            "cassette": "a.tape.json",
+            "action": "replayed",
+            "calls": 1,
+            "input_tokens": 200,
+            "cached_input_tokens": 50,
+            "output_tokens": 100,
+            "total_tokens": 300,
+            "estimated_cost_usd": 0.001,
+            "latency_ms": 10.0,
+        }
+    )
+    w1_session = SimpleNamespace(config=w1_cfg, exitstatus=pytest.ExitCode.OK)
+    pytest_sessionfinish(w1_session, 0)  # type: ignore[arg-type]
+    # Worker must NOT write the JSON report or fail locally
+    assert not json_report.exists()
+    assert w1_session.exitstatus == pytest.ExitCode.OK
+    assert len(w1_cfg.workeroutput["llm_tape_entries"]) == 1
+
+    w2_cfg = _make_config(is_worker=True, max_tokens=500)
+    w2_cfg.stash[_REPORT_KEY].append(
+        {
+            "nodeid": "test_b.py::test_2",
+            "cassette": "b.tape.json",
+            "action": "replayed",
+            "calls": 1,
+            "input_tokens": 200,
+            "cached_input_tokens": 0,
+            "output_tokens": 100,
+            "total_tokens": 300,
+            "estimated_cost_usd": 0.001,
+            "latency_ms": 15.0,
+        }
+    )
+    w2_session = SimpleNamespace(config=w2_cfg, exitstatus=pytest.ExitCode.OK)
+    pytest_sessionfinish(w2_session, 0)  # type: ignore[arg-type]
+
+    # Controller merges both workers via pytest_testnodedown and enforces total cap (600 > 500)
+    ctrl_cfg = _make_config(is_worker=False, max_tokens=500)
+    pytest_testnodedown(SimpleNamespace(config=ctrl_cfg, workeroutput=w1_cfg.workeroutput), None)
+    pytest_testnodedown(SimpleNamespace(config=ctrl_cfg, workeroutput=w2_cfg.workeroutput), None)
+    ctrl_session = SimpleNamespace(config=ctrl_cfg, exitstatus=pytest.ExitCode.OK)
+    pytest_sessionfinish(ctrl_session, 0)  # type: ignore[arg-type]
+
+    assert ctrl_session.exitstatus == pytest.ExitCode.TESTS_FAILED
+    assert json_report.exists()
+    report = json.loads(json_report.read_text(encoding="utf-8"))
+    assert report["totals"]["tests"] == 2
+    assert report["totals"]["total_tokens"] == 600
+    assert len(report["budget_violations"]) == 1
