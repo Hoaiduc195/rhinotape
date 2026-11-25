@@ -412,7 +412,15 @@ class Cassette:
                 "Run with mode='once' or mode='record' first to record interactions."
             )
         try:
+            st_size = cassette_path.stat().st_size
+            if cassette_path.suffix.lower() != ".gz" and st_size > MAX_CASSETTE_BYTES:
+                raise CorruptCassetteError(
+                    f"Cassette {cassette_path} exceeds safety size limit "
+                    f"({MAX_CASSETTE_BYTES} bytes)."
+                )
             raw_bytes = cassette_path.read_bytes()
+        except CorruptCassetteError:
+            raise
         except OSError as exc:
             raise CorruptCassetteError(f"Failed to read cassette {cassette_path}: {exc}") from exc
         return cls.from_bytes(raw_bytes, path=cassette_path)
