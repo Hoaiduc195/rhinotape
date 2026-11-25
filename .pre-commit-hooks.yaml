@@ -1,0 +1,13 @@
+- id: llm-tape-verify
+  name: Verify llm-tape cassettes
+  description: Validate .tape.json and .tape.json.gz cassettes for schema integrity.
+  entry: llm-tape verify
+  language: python
+  files: '\.tape\.json(\.gz)?$'
+
+- id: llm-tape-verify-secrets
+  name: Verify llm-tape cassettes (with secret scan)
+  description: Validate .tape.json(.gz) cassettes and fail if unredacted API keys/tokens are found.
+  entry: llm-tape verify --check-secrets
+  language: python
+  files: '\.tape\.json(\.gz)?$'

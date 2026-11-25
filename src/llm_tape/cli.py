@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import argparse
 import ast
+import csv
+import io
 import json
 import math
+import os
 import re
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -68,6 +72,7 @@ def _cassette_stats(cassette: Cassette) -> dict[str, Any]:
         "input_tokens": sum(i.llm.usage.input_tokens for i in cassette.interactions),
         "cached_input_tokens": sum(i.llm.usage.cached_input_tokens for i in cassette.interactions),
         "output_tokens": sum(i.llm.usage.output_tokens for i in cassette.interactions),
+        "reasoning_tokens": sum(i.llm.usage.reasoning_tokens for i in cassette.interactions),
         "total_tokens": sum(i.llm.usage.total_tokens for i in cassette.interactions),
         "estimated_cost_usd": round(
             sum(i.llm.estimated_cost_usd for i in cassette.interactions), 8
@@ -294,16 +299,19 @@ def _scan_cassette_secrets(
 
 
 def _cmd_verify(
-    target: Path,
+    targets: list[Path],
     *,
     check_secrets: bool = False,
     secret_patterns: list[str] | None = None,
     as_json: bool = False,
 ) -> int:
-    """Validate .tape.json cassette(s) for schema integrity and optional secret leaks."""
-    if not target.exists():
-        print(f"Error: path not found: {target}", file=sys.stderr)
-        return 1
+    """Validate .tape.json(.gz) cassette(s) for schema integrity and optional secret leaks."""
+    if not targets:
+        targets = [Path(".")]
+    for target in targets:
+        if not target.exists():
+            print(f"Error: path not found: {target}", file=sys.stderr)
+            return 1
 
     compiled_patterns: list[tuple[str, re.Pattern[str]]] = []
     if check_secrets or secret_patterns:
@@ -311,7 +319,13 @@ def _cmd_verify(
         for idx, pat in enumerate(secret_patterns or (), start=1):
             compiled_patterns.append((f"custom_{idx}", re.compile(pat)))
 
-    files = [target] if target.is_file() else iter_cassette_files(target)
+    files_set: set[Path] = set()
+    for target in targets:
+        if target.is_file():
+            files_set.add(target)
+        else:
+            files_set.update(iter_cassette_files(target))
+    files = sorted(files_set)
     schema_errors: list[dict[str, str]] = []
     secret_findings: list[dict[str, str]] = []
 
@@ -355,7 +369,8 @@ def _cmd_verify(
             file=sys.stderr,
         )
         return 1
-    print(f"OK: verified {len(files)} cassette(s) in {target}.")
+    label = str(targets[0]) if len(targets) == 1 else f"{len(targets)} targets"
+    print(f"OK: verified {len(files)} cassette(s) in {label}.")
     return 0
 
 
@@ -958,6 +973,242 @@ def _cmd_redact(
     return 0
 
 
+def _write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = text.encode("utf-8")
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.stem}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp_path = tmp.name
+            tmp.write(data)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def _render_har(cassettes: list[Cassette]) -> str:
+    entries: list[dict[str, Any]] = []
+    for cassette in cassettes:
+        started = cassette.recorded_at or datetime.now(timezone.utc).isoformat()
+        for inter in cassette.interactions:
+            req_mime = inter.request.headers.get(
+                "content-type", inter.request.headers.get("Content-Type", "application/json")
+            )
+            req_text = (
+                json.dumps(inter.request.body, ensure_ascii=False)
+                if isinstance(inter.request.body, (dict, list))
+                else ("" if inter.request.body is None else str(inter.request.body))
+            )
+            resp_mime = inter.response.headers.get(
+                "content-type", inter.response.headers.get("Content-Type", "application/json")
+            )
+            if inter.response.stream_chunks is not None:
+                resp_text = "".join(inter.response.stream_chunks)
+                resp_encoding: str | None = None
+            elif inter.response.body_encoding == "base64":
+                resp_text = str(inter.response.body or "")
+                resp_encoding = "base64"
+            elif isinstance(inter.response.body, (dict, list)):
+                resp_text = json.dumps(inter.response.body, ensure_ascii=False)
+                resp_encoding = None
+            else:
+                resp_text = "" if inter.response.body is None else str(inter.response.body)
+                resp_encoding = None
+
+            resp_content: dict[str, Any] = {
+                "size": len(resp_text.encode("utf-8")),
+                "mimeType": resp_mime,
+                "text": resp_text,
+            }
+            if resp_encoding is not None:
+                resp_content["encoding"] = resp_encoding
+
+            har_req: dict[str, Any] = {
+                "method": inter.request.method,
+                "url": inter.request.url,
+                "httpVersion": "HTTP/1.1",
+                "headers": [{"name": k, "value": v} for k, v in inter.request.headers.items()],
+                "queryString": [],
+                "cookies": [],
+                "headersSize": -1,
+                "bodySize": len(req_text.encode("utf-8")),
+            }
+            if req_text:
+                har_req["postData"] = {"mimeType": req_mime, "text": req_text}
+
+            entries.append(
+                {
+                    "startedDateTime": started,
+                    "time": round(inter.latency_ms, 2),
+                    "request": har_req,
+                    "response": {
+                        "status": inter.response.status_code,
+                        "statusText": "",
+                        "httpVersion": "HTTP/1.1",
+                        "headers": [
+                            {"name": k, "value": v} for k, v in inter.response.headers.items()
+                        ],
+                        "cookies": [],
+                        "content": resp_content,
+                        "redirectURL": "",
+                        "headersSize": -1,
+                        "bodySize": resp_content["size"],
+                    },
+                    "cache": {},
+                    "timings": {"send": 0, "wait": round(inter.latency_ms, 2), "receive": 0},
+                    "comment": f"{inter.llm.provider}:{inter.llm.model or 'unknown'}",
+                }
+            )
+    payload = {
+        "log": {
+            "version": "1.2",
+            "creator": {"name": "llm-tape", "version": _VERSION},
+            "entries": entries,
+        }
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+
+def _cmd_export(target: Path, *, fmt: str, output: Path | None = None) -> int:
+    """Export cassette(s) as Markdown PR summary, CSV cost report, or HAR 1.2 archive."""
+    if not target.exists():
+        print(f"Error: path not found: {target}", file=sys.stderr)
+        return 1
+
+    files = [target] if target.is_file() else iter_cassette_files(target)
+    base_dir = target.parent if target.is_file() else target
+    cassettes = [Cassette.load(p) for p in files]
+
+    if fmt == "har":
+        rendered = _render_har(cassettes)
+    elif fmt == "csv":
+        buf = io.StringIO()
+        writer = csv.writer(buf, lineterminator="\n")
+        writer.writerow(
+            [
+                "cassette",
+                "calls",
+                "input_tokens",
+                "cached_input_tokens",
+                "output_tokens",
+                "reasoning_tokens",
+                "total_tokens",
+                "estimated_cost_usd",
+                "latency_ms",
+            ]
+        )
+        for c in cassettes:
+            s = _cassette_stats(c)
+            rel = str(c.path.relative_to(base_dir))
+            writer.writerow(
+                [
+                    rel,
+                    s["calls"],
+                    s["input_tokens"],
+                    s["cached_input_tokens"],
+                    s["output_tokens"],
+                    s["reasoning_tokens"],
+                    s["total_tokens"],
+                    f"{s['estimated_cost_usd']:.8f}",
+                    f"{s['latency_ms']:.2f}",
+                ]
+            )
+        rendered = buf.getvalue()
+    else:  # markdown
+        lines = [
+            "| Cassette | Calls | Tokens | Cached | Reasoning | Est. Cost | Latency |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+        t_calls = t_tokens = t_cached = t_reasoning = 0
+        t_cost = 0.0
+        t_latency = 0.0
+        for c in cassettes:
+            s = _cassette_stats(c)
+            rel = str(c.path.relative_to(base_dir)).replace("|", "\\|")
+            lines.append(
+                f"| `{rel}` | {s['calls']} | {s['total_tokens']} | "
+                f"{s['cached_input_tokens']} | {s['reasoning_tokens']} | "
+                f"${s['estimated_cost_usd']:.6f} | {s['latency_ms']:.1f}ms |"
+            )
+            t_calls += int(s["calls"])
+            t_tokens += int(s["total_tokens"])
+            t_cached += int(s["cached_input_tokens"])
+            t_reasoning += int(s["reasoning_tokens"])
+            t_cost += float(s["estimated_cost_usd"])
+            t_latency += float(s["latency_ms"])
+        lines.append(
+            f"| **TOTAL ({len(cassettes)} files)** | **{t_calls}** | **{t_tokens}** | "
+            f"**{t_cached}** | **{t_reasoning}** | **${t_cost:.6f}** | **{t_latency:.1f}ms** |"
+        )
+        rendered = "\n".join(lines) + "\n"
+
+    if output is not None:
+        _write_text_atomic(output, rendered)
+        print(f"Exported {fmt} report ({len(cassettes)} cassette(s)) to {output}.")
+    else:
+        sys.stdout.write(rendered)
+    return 0
+
+
+def _cmd_convert(
+    target: Path,
+    *,
+    to_format: str,
+    delete_source: bool = False,
+    dry_run: bool = False,
+) -> int:
+    """Convert cassettes between plain .tape.json and gzip-compressed .tape.json.gz."""
+    if not target.exists():
+        print(f"Error: path not found: {target}", file=sys.stderr)
+        return 1
+
+    if target.is_file():
+        files = [target]
+    else:
+        resolved_root = target.resolve()
+        files = [
+            p
+            for p in iter_cassette_files(target)
+            if not p.is_symlink() and p.is_file() and p.resolve().is_relative_to(resolved_root)
+        ]
+
+    converted = 0
+    for file_path in files:
+        is_gz = file_path.name.lower().endswith(".gz")
+        if (to_format == "gzip" and is_gz) or (to_format == "json" and not is_gz):
+            continue
+        stem = _cassette_stem(file_path)
+        new_ext = ".tape.json.gz" if to_format == "gzip" else ".tape.json"
+        dest_path = file_path.with_name(f"{stem}{new_ext}")
+        converted += 1
+        if dry_run:
+            print(f"WOULD CONVERT: {file_path} -> {dest_path}")
+            continue
+        cassette = Cassette.load(file_path)
+        cassette.path = dest_path
+        cassette.save()
+        if delete_source and dest_path.resolve() != file_path.resolve():
+            file_path.unlink(missing_ok=True)
+        print(f"CONVERTED: {file_path} -> {dest_path}")
+
+    suffix = " (dry-run)" if dry_run else ""
+    print(f"Done: {converted}/{len(files)} cassette(s) converted to {to_format}{suffix}.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llm-tape",
@@ -1000,14 +1251,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_verify = sub.add_parser(
         "verify",
-        help="Validate .tape.json cassette(s) for schema integrity and optional secret leaks.",
+        help="Validate .tape.json(.gz) cassette(s) for schema integrity and optional secret leaks.",
     )
     p_verify.add_argument(
-        "target",
+        "targets",
         type=Path,
-        nargs="?",
-        default=Path("."),
-        help="Cassette file or directory to validate (default: current directory).",
+        nargs="*",
+        default=[],
+        help="Cassette file(s) or directory(ies) to validate (default: current directory).",
     )
     p_verify.add_argument(
         "--check-secrets",
@@ -1121,6 +1372,61 @@ def build_parser() -> argparse.ArgumentParser:
         help="Report cassettes that would change without modifying files.",
     )
 
+    p_export = sub.add_parser(
+        "export",
+        help="Export cassette(s) to Markdown PR summary, CSV cost report, or HAR 1.2 archive.",
+    )
+    p_export.add_argument(
+        "target",
+        type=Path,
+        nargs="?",
+        default=Path("."),
+        help="Cassette file or directory to export (default: current directory).",
+    )
+    p_export.add_argument(
+        "--format",
+        choices=["markdown", "csv", "har"],
+        default="markdown",
+        dest="fmt",
+        help="Output format: markdown (default), csv, or har.",
+    )
+    p_export.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=None,
+        help="Optional file path to write output (defaults to stdout).",
+    )
+
+    p_convert = sub.add_parser(
+        "convert",
+        help="Convert cassettes between plain .tape.json and gzip-compressed .tape.json.gz.",
+    )
+    p_convert.add_argument(
+        "target",
+        type=Path,
+        nargs="?",
+        default=Path("."),
+        help="Cassette file or directory to convert (default: current directory).",
+    )
+    p_convert.add_argument(
+        "--to",
+        choices=["gzip", "json"],
+        required=True,
+        dest="to_format",
+        help="Target cassette format: gzip (.tape.json.gz) or json (.tape.json).",
+    )
+    p_convert.add_argument(
+        "--delete-source",
+        action="store_true",
+        help="Delete the original file after successful conversion.",
+    )
+    p_convert.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview conversions without modifying files.",
+    )
+
     return parser
 
 
@@ -1139,7 +1445,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.command == "verify":
             return _cmd_verify(
-                args.target,
+                args.targets,
                 check_secrets=args.check_secrets,
                 secret_patterns=args.secret_patterns,
                 as_json=args.as_json,
@@ -1168,6 +1474,15 @@ def main(argv: list[str] | None = None) -> int:
                 query_params=args.query_params,
                 fields=args.fields,
                 patterns=args.patterns,
+                dry_run=args.dry_run,
+            )
+        if args.command == "export":
+            return _cmd_export(args.target, fmt=args.fmt, output=args.output)
+        if args.command == "convert":
+            return _cmd_convert(
+                args.target,
+                to_format=args.to_format,
+                delete_source=args.delete_source,
                 dry_run=args.dry_run,
             )
     except (TapeError, re.error) as exc:
