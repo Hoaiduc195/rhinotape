@@ -286,23 +286,23 @@ class _StreamContentDecoder:
 
 
 class _ReplayByteStream(httpx.SyncByteStream, httpx.AsyncByteStream):
-    """Yields recorded SSE/stream chunks for both sync and async httpx replay."""
+    """Yields recorded SSE/stream chunks lazily for both sync and async httpx replay."""
 
     def __init__(self, chunks: tuple[str, ...], *, chunk_delay_s: float = 0.0) -> None:
-        self._chunks = [c.encode("utf-8") for c in chunks]
+        self._chunks = chunks
         self._chunk_delay_s = max(0.0, chunk_delay_s)
 
     def __iter__(self) -> Iterator[bytes]:
         for chunk in self._chunks:
             if self._chunk_delay_s > 0.0:
                 time.sleep(self._chunk_delay_s)
-            yield chunk
+            yield chunk.encode("utf-8")
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         for chunk in self._chunks:
             if self._chunk_delay_s > 0.0:
                 await asyncio.sleep(self._chunk_delay_s)
-            yield chunk
+            yield chunk.encode("utf-8")
 
 
 class _ReplayRawBytesStream(httpx.SyncByteStream, httpx.AsyncByteStream):

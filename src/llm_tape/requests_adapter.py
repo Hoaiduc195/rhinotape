@@ -56,22 +56,27 @@ def _extract_body_bytes(prepared_request: Any) -> bytes:
 
 
 class _ReplayRequestsRaw:
-    """Minimal urllib3-compatible raw stream for replaying recorded bytes/SSE chunks."""
+    """Minimal urllib3-compatible raw stream for lazily replaying recorded bytes/SSE chunks."""
 
-    def __init__(self, chunks: tuple[bytes, ...], *, chunk_delay_s: float = 0.0) -> None:
+    def __init__(self, chunks: tuple[str | bytes, ...], *, chunk_delay_s: float = 0.0) -> None:
         self._chunks = chunks
         self._chunk_delay_s = max(0.0, chunk_delay_s)
         self._idx = 0
         self._buf = b""
         self.closed = False
 
+    @staticmethod
+    def _to_bytes(chunk: str | bytes) -> bytes:
+        return chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+
     def stream(self, amt: int | None = 65536, decode_content: bool = True) -> Iterator[bytes]:
         del decode_content
-        for chunk in self._chunks:
+        for raw_chunk in self._chunks:
             if self.closed:
                 break
             if self._chunk_delay_s > 0.0:
                 time.sleep(self._chunk_delay_s)
+            chunk = self._to_bytes(raw_chunk)
             if amt is None or amt <= 0 or len(chunk) <= amt:
                 if chunk:
                     yield chunk
@@ -90,14 +95,14 @@ class _ReplayRequestsRaw:
             while self._idx < len(self._chunks):
                 if self._chunk_delay_s > 0.0:
                     time.sleep(self._chunk_delay_s)
-                parts.append(self._chunks[self._idx])
+                parts.append(self._to_bytes(self._chunks[self._idx]))
                 self._idx += 1
             self.closed = True
             return b"".join(parts)
         while len(self._buf) < amt and self._idx < len(self._chunks):
             if self._chunk_delay_s > 0.0:
                 time.sleep(self._chunk_delay_s)
-            self._buf += self._chunks[self._idx]
+            self._buf += self._to_bytes(self._chunks[self._idx])
             self._idx += 1
         out = self._buf[:amt]
         self._buf = self._buf[amt:]
@@ -228,13 +233,14 @@ def _build_replay_requests_response(
     resp.headers = requests_mod.structures.CaseInsensitiveDict(replay_headers)
 
     if interaction.response.stream_chunks is not None:
-        encoded_chunks = tuple(c.encode("utf-8") for c in interaction.response.stream_chunks)
         if stream:
-            resp.raw = _ReplayRequestsRaw(encoded_chunks, chunk_delay_s=chunk_delay_s)
+            resp.raw = _ReplayRequestsRaw(
+                interaction.response.stream_chunks, chunk_delay_s=chunk_delay_s
+            )
             resp._content = False
             resp._content_consumed = False
         else:
-            raw_bytes = b"".join(encoded_chunks)
+            raw_bytes = "".join(interaction.response.stream_chunks).encode("utf-8")
             resp.raw = _ReplayRequestsRaw((raw_bytes,))
             resp._content = raw_bytes
             resp._content_consumed = True
