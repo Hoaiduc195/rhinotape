@@ -62,19 +62,23 @@ from llm_tape.scrubbing import (
 )
 from llm_tape.server import TapeReplayServer
 from llm_tape.session import TapeSession, replace_response, tape, use_tape
+from llm_tape.stores import CassetteStore, FileCassetteStore, MemoryCassetteStore
 from llm_tape.transport import AsyncTapeTransport, TapeTransport
 
 __all__ = [
     "AsyncTapeTransport",
     "Cassette",
+    "CassetteStore",
     "CorruptCassetteError",
     "DEFAULT_MATCH_ON",
     "DEFAULT_PRICING",
+    "FileCassetteStore",
     "Interaction",
     "LLMCallSummary",
     "MATCH_PATH_AND_BODY",
     "MATCH_RELAXED",
     "MATCH_STRICT",
+    "MemoryCassetteStore",
     "ModelPrice",
     "PII_CREDIT_CARD",
     "PII_EMAIL",
