@@ -46,3 +46,16 @@ def test_wave18_cassette_merge_and_cli(tmp_path: Path, capsys: pytest.CaptureFix
     loaded = Cassette.load(out)
     assert [i.request.fingerprint for i in loaded.interactions] == ["fp1", "fp2", "fp3"]
     assert loaded.metadata == {"a": 1, "b": 2}
+
+
+def test_wave19_cassette_filter_slice_and_deduplicate(tmp_path: Path) -> None:
+    c = Cassette(
+        path=tmp_path / "ops.tape.json",
+        interactions=[_mk_inter("a", latency=10), _mk_inter("b", latency=50), _mk_inter("a")],
+    )
+    filtered = c.filter(lambda i: i.latency_ms >= 20)
+    assert [i.request.fingerprint for i in filtered.interactions] == ["b"]
+    sliced = c.slice(0, 2)
+    assert [i.request.fingerprint for i in sliced.interactions] == ["a", "b"]
+    deduped = c.deduplicate()
+    assert [i.request.fingerprint for i in deduped.interactions] == ["a", "b"]

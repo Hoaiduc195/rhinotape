@@ -9,6 +9,7 @@ import json
 import os
 import tempfile
 import zlib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -186,6 +187,39 @@ class Cassette:
             path=Path(output_path),
             interactions=merged_interactions,
             metadata=merged_meta,
+        )
+
+    def filter(self, predicate: Callable[[Interaction], bool]) -> Cassette:
+        """Return a new Cassette keeping only interactions where predicate(inter) is True."""
+        return Cassette(
+            path=self.path,
+            interactions=[i for i in self.interactions if predicate(i)],
+            recorded_at=self.recorded_at,
+            metadata=dict(self.metadata),
+        )
+
+    def slice(self, start: int | None = None, end: int | None = None) -> Cassette:
+        """Return a new Cassette containing interactions[start:end]."""
+        return Cassette(
+            path=self.path,
+            interactions=list(self.interactions[start:end]),
+            recorded_at=self.recorded_at,
+            metadata=dict(self.metadata),
+        )
+
+    def deduplicate(self) -> Cassette:
+        """Return a new Cassette with duplicate request fingerprints removed (preserving order)."""
+        seen: set[str] = set()
+        unique: list[Interaction] = []
+        for inter in self.interactions:
+            if inter.request.fingerprint not in seen:
+                seen.add(inter.request.fingerprint)
+                unique.append(inter)
+        return Cassette(
+            path=self.path,
+            interactions=unique,
+            recorded_at=self.recorded_at,
+            metadata=dict(self.metadata),
         )
 
     @classmethod
