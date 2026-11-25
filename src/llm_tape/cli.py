@@ -31,9 +31,11 @@ from llm_tape.models import (
 )
 from llm_tape.parsers import parse_llm_interaction, split_sse_chunks
 from llm_tape.scrubbing import (
+    compile_patterns,
     fingerprint_request,
     redact_body,
     redact_text,
+    resolve_pii_patterns,
     scrub_headers,
     scrub_url,
 )
@@ -906,11 +908,21 @@ def _cmd_redact(
     query_params: list[str],
     fields: list[str],
     patterns: list[str],
+    pii: str | None = None,
     dry_run: bool = False,
 ) -> int:
     """Re-scrub one .tape.json file or all cassettes under a directory."""
     if not target.exists():
         print(f"Error: path not found: {target}", file=sys.stderr)
+        return 1
+
+    try:
+        pii_patterns = (
+            resolve_pii_patterns([p.strip() for p in pii.split(",") if p.strip()]) if pii else ()
+        )
+        effective_patterns = (*compile_patterns(patterns), *pii_patterns)
+    except (ValueError, re.error) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     files = [target] if target.is_file() else iter_cassette_files(target)
@@ -927,7 +939,9 @@ def _cmd_redact(
             new_url = scrub_url(inter.request.url, extra_sensitive=query_params)
             new_req_headers = scrub_headers(inter.request.headers, extra_sensitive=headers)
             new_req_body = (
-                redact_body(inter.request.body, redact_fields=fields, redact_patterns=patterns)
+                redact_body(
+                    inter.request.body, redact_fields=fields, redact_patterns=effective_patterns
+                )
                 if inter.request.body_encoding not in {"base64", "empty"}
                 else inter.request.body
             )
@@ -948,14 +962,20 @@ def _cmd_redact(
 
             new_resp_headers = scrub_headers(inter.response.headers, extra_sensitive=headers)
             new_resp_body = (
-                redact_body(inter.response.body, redact_fields=fields, redact_patterns=patterns)
+                redact_body(
+                    inter.response.body, redact_fields=fields, redact_patterns=effective_patterns
+                )
                 if inter.response.body_encoding not in {"base64", "empty"}
                 else inter.response.body
             )
-            if inter.response.stream_chunks is not None and patterns:
-                per_chunk = [redact_text(c, patterns) for c in inter.response.stream_chunks]
+            if inter.response.stream_chunks is not None and effective_patterns:
+                per_chunk = [
+                    redact_text(c, effective_patterns) for c in inter.response.stream_chunks
+                ]
                 joined_per_chunk = "".join(per_chunk)
-                joined_redacted = redact_text("".join(inter.response.stream_chunks), patterns)
+                joined_redacted = redact_text(
+                    "".join(inter.response.stream_chunks), effective_patterns
+                )
                 if joined_redacted != joined_per_chunk:
                     new_chunks: tuple[str, ...] | None = tuple(split_sse_chunks(joined_redacted))
                 else:
@@ -1716,6 +1736,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Regex pattern to redact in bodies and stream chunks (repeatable).",
     )
     p_redact.add_argument(
+        "--pii",
+        nargs="?",
+        const="all",
+        default=None,
+        help=(
+            "Redact built-in PII presets (omit value for all, or comma-separated: "
+            "email,phone,ssn,credit_card,ipv4,jwt)."
+        ),
+    )
+    p_redact.add_argument(
         "--dry-run",
         action="store_true",
         help="Report cassettes that would change without modifying files.",
@@ -1920,6 +1950,7 @@ def main(argv: list[str] | None = None) -> int:
                 query_params=args.query_params,
                 fields=args.fields,
                 patterns=args.patterns,
+                pii=args.pii,
                 dry_run=args.dry_run,
             )
         if args.command == "export":
