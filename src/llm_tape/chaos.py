@@ -124,3 +124,19 @@ def truncate_stream(max_chunks: int, *, nth: int | None = None) -> ReplayHook:
         return replace_response(interaction, stream_chunks=chunks[:max_chunks])
 
     return _hook
+
+
+def chain_replay_hooks(*hooks: ReplayHook) -> ReplayHook:
+    """Compose multiple on_replay hooks sequentially, feeding transformed Interactions forward."""
+
+    def _hook(interaction: Interaction, call_index: int) -> Interaction | None:
+        current = interaction
+        changed = False
+        for hook in hooks:
+            result = hook(current, call_index)
+            if result is not None:
+                current = result
+                changed = True
+        return current if changed else None
+
+    return _hook
