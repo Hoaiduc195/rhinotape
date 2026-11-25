@@ -82,12 +82,22 @@ def load_pricing_file(path: str | Path) -> dict[str, ModelPrice]:
     for model_name, entry in raw.items():
         if not isinstance(entry, dict):
             raise ValueError(f"Pricing entry for {model_name!r} must be a JSON object.")
+        raw_in = entry.get("input_per_million")
+        raw_out = entry.get("output_per_million")
+        if raw_in is None or raw_out is None:
+            raise ValueError(
+                f"Pricing entry for {model_name!r} must specify numeric "
+                "'input_per_million' and 'output_per_million'."
+            )
         cached = entry.get("cached_input_per_million")
-        table[str(model_name).lower().strip()] = ModelPrice(
-            input_per_million=float(entry["input_per_million"]),
-            output_per_million=float(entry["output_per_million"]),
-            cached_input_per_million=float(cached) if cached is not None else None,
-        )
+        try:
+            table[str(model_name).lower().strip()] = ModelPrice(
+                input_per_million=float(raw_in),
+                output_per_million=float(raw_out),
+                cached_input_per_million=float(cached) if cached is not None else None,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid numeric price for {model_name!r}: {exc}") from exc
     return table
 
 
@@ -114,12 +124,26 @@ def estimate_cost_usd(
     if env_file and Path(env_file).is_file():
         try:
             table.update(load_pricing_file(env_file))
-        except (OSError, ValueError, KeyError):
+        except (OSError, ValueError, KeyError, TypeError):
             pass
     if custom_pricing:
         table.update({k.lower().strip(): v for k, v in custom_pricing.items()})
 
-    normalized = model.lower().strip()
+    raw_normalized = model.lower().strip()
+    # Check exact or boundary-safe match BEFORE stripping provider prefixes so custom
+    # keys like "openai/gpt-4o-mini" or "us.anthropic.claude-3-5-sonnet" still match!
+    if raw_normalized in table:
+        return table[raw_normalized].compute(
+            input_tokens, output_tokens, cached_input_tokens=cached_input_tokens
+        )
+    raw_matches = [key for key in table if _matches_model_prefix(raw_normalized, key)]
+    if raw_matches:
+        best = max(raw_matches, key=len)
+        return table[best].compute(
+            input_tokens, output_tokens, cached_input_tokens=cached_input_tokens
+        )
+
+    normalized = raw_normalized
     if normalized.startswith("models/"):
         normalized = normalized[len("models/") :]
     # Strip provider prefixes used by OpenRouter / Bedrock (e.g. "openai/gpt-4o-mini",

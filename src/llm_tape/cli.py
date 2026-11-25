@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from llm_tape.models import (
     TapeError,
     ToolCall,
 )
+from llm_tape.parsers import parse_llm_interaction
 from llm_tape.scrubbing import (
     fingerprint_request,
     redact_body,
@@ -138,7 +140,7 @@ def _cmd_summary(
             f"Budget exceeded: total tokens {grand_tokens} > --max-tokens {max_tokens}",
             file=sys.stderr,
         )
-    if max_cost is not None and grand_cost > max_cost:
+    if max_cost is not None and round(grand_cost, 8) > max_cost:
         budget_exceeded = True
         print(
             f"Budget exceeded: total cost ${grand_cost:.6f} > --max-cost ${max_cost:.6f}",
@@ -274,12 +276,15 @@ def _cmd_redact(
             new_req_headers = scrub_headers(inter.request.headers, extra_sensitive=headers)
             new_req_body = (
                 redact_body(inter.request.body, redact_fields=fields, redact_patterns=patterns)
-                if inter.request.body_encoding != "base64"
+                if inter.request.body_encoding not in {"base64", "empty"}
                 else inter.request.body
             )
-            new_fp = fingerprint_request(
-                inter.request.method, new_url, new_req_body, headers=new_req_headers
-            )
+            if new_url != inter.request.url or new_req_body != inter.request.body:
+                new_fp = fingerprint_request(
+                    inter.request.method, new_url, new_req_body, headers=new_req_headers
+                )
+            else:
+                new_fp = inter.request.fingerprint
             new_req = RecordedRequest(
                 method=inter.request.method,
                 url=new_url,
@@ -292,14 +297,24 @@ def _cmd_redact(
             new_resp_headers = scrub_headers(inter.response.headers, extra_sensitive=headers)
             new_resp_body = (
                 redact_body(inter.response.body, redact_fields=fields, redact_patterns=patterns)
-                if inter.response.body_encoding != "base64"
+                if inter.response.body_encoding not in {"base64", "empty"}
                 else inter.response.body
             )
-            new_chunks = (
-                tuple(redact_text(c, patterns) for c in inter.response.stream_chunks)
-                if (inter.response.stream_chunks is not None and patterns)
-                else inter.response.stream_chunks
-            )
+            if inter.response.stream_chunks is not None and patterns:
+                per_chunk = [redact_text(c, patterns) for c in inter.response.stream_chunks]
+                joined_per_chunk = "".join(per_chunk)
+                joined_redacted = redact_text(joined_per_chunk, patterns)
+                if joined_redacted != joined_per_chunk:
+                    parts = joined_redacted.split("\n\n")
+                    new_chunks: tuple[str, ...] | None = tuple(
+                        f"{p}\n\n" if i < len(parts) - 1 else p
+                        for i, p in enumerate(parts)
+                        if p or i < len(parts) - 1
+                    )
+                else:
+                    new_chunks = tuple(per_chunk)
+            else:
+                new_chunks = inter.response.stream_chunks
             new_resp = RecordedResponse(
                 status_code=inter.response.status_code,
                 headers=new_resp_headers,
@@ -307,7 +322,23 @@ def _cmd_redact(
                 body_encoding=inter.response.body_encoding,
                 stream_chunks=new_chunks,
             )
-            new_llm_text = redact_text(inter.llm.text, patterns) if patterns else inter.llm.text
+            if new_resp != inter.response:
+                reparsed = parse_llm_interaction(
+                    url=new_req.url,
+                    request_body=new_req.body,
+                    response_body=new_resp.body,
+                    stream_chunks=new_resp.stream_chunks,
+                    content_type=new_resp.headers.get("content-type", ""),
+                )
+                base_text = reparsed.text if reparsed.provider != "unknown" else inter.llm.text
+                base_calls = (
+                    reparsed.tool_calls if reparsed.provider != "unknown" else inter.llm.tool_calls
+                )
+            else:
+                base_text = inter.llm.text
+                base_calls = inter.llm.tool_calls
+
+            new_llm_text = redact_text(base_text, patterns) if patterns else base_text
             new_tool_calls = tuple(
                 ToolCall(
                     name=tc.name,
@@ -316,7 +347,7 @@ def _cmd_redact(
                     ),
                     call_id=tc.call_id,
                 )
-                for tc in inter.llm.tool_calls
+                for tc in base_calls
             )
             new_llm = LLMCallSummary(
                 provider=inter.llm.provider,
@@ -479,7 +510,7 @@ def main(argv: list[str] | None = None) -> int:
                 patterns=args.patterns,
                 dry_run=args.dry_run,
             )
-    except TapeError as exc:
+    except (TapeError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     return 0

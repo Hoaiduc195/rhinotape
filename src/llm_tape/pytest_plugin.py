@@ -155,7 +155,7 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
 
     ignore_localhost = (
         bool(marker_kwargs["ignore_localhost"])
-        if "ignore_localhost" in marker_kwargs
+        if marker_kwargs.get("ignore_localhost") is not None
         else ini_ignore_localhost
     )
     ignore_hosts = (*ini_ignore_hosts, *marker_kwargs.get("ignore_hosts", ()))

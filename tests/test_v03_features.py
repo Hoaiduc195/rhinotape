@@ -722,3 +722,180 @@ def test_unused_interactions_with_allow_playback_repeats_and_extra_edge_cases(
         load_pricing_file(bad_entry)
     monkeypatch.setenv(PRICING_FILE_ENV, str(bad_entry))
     assert estimate_cost_usd("gpt-4o-mini", 1_000_000, 0) == pytest.approx(0.15)
+
+
+def test_rv_review_regressions_p1_and_p2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import zlib
+
+    # P1 #1: custom_matcher + allow_playback_repeats=True with >1 interaction
+    c_multi = tmp_path / "custom_multi.tape.json"
+
+    def multi_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"path": request.url.path})
+
+    with tape(c_multi, mode="record"):
+        with httpx.Client(transport=httpx.MockTransport(multi_handler)) as client:
+            client.get("https://api.example.com/a")
+            client.get("https://api.example.com/b")
+
+    with tape(
+        c_multi,
+        mode="replay",
+        allow_playback_repeats=True,
+        custom_matcher=lambda rec, inc: rec.url == inc.url,
+    ) as session:
+        with httpx.Client(transport=httpx.MockTransport(multi_handler)) as client:
+            assert client.get("https://api.example.com/a").json() == {"path": "/a"}
+            assert client.get("https://api.example.com/a").json() == {"path": "/a"}
+            assert client.get("https://api.example.com/b").json() == {"path": "/b"}
+        session.assert_call_count(3)
+        session.assert_no_unused_interactions()
+
+    # P1 #2: llm-tape redact --field must ALSO redact llm.text
+    c_field = tmp_path / "field_redact.tape.json"
+
+    def oai_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "model": "gpt-4o-mini",
+                "choices": [{"message": {"role": "assistant", "content": "SECRET_PII_42"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+        )
+
+    with tape(c_field, mode="record"):
+        with httpx.Client(transport=httpx.MockTransport(oai_handler)) as client:
+            client.post("https://api.openai.com/v1/chat/completions", json={"q": "hi"})
+
+    assert cli_main(["redact", str(c_field), "--field", "choices.*.message.content"]) == 0
+    capsys.readouterr()
+    raw_after = c_field.read_text(encoding="utf-8")
+    assert "SECRET_PII_42" not in raw_after
+    assert Cassette.load(c_field).interactions[0].llm.text == "[REDACTED]"
+
+    # P2 #1: Bedrock Converse adds cacheReadInputTokens + cacheWriteInputTokens to input_tokens
+    bedrock_url = (
+        "https://bedrock-runtime.us-east-1.amazonaws.com/model/"
+        "anthropic.claude-3-5-sonnet-20241022-v2%3A0/converse"
+    )
+    s_br = parse_llm_interaction(
+        bedrock_url,
+        {},
+        {
+            "output": {"message": {"role": "assistant", "content": [{"text": "ok"}]}},
+            "usage": {
+                "inputTokens": 100,
+                "outputTokens": 20,
+                "cacheReadInputTokens": 500,
+                "cacheWriteInputTokens": 50,
+            },
+        },
+    )
+    assert s_br.usage.input_tokens == 650
+    assert s_br.usage.cached_input_tokens == 500
+
+    # P2 #2: Ollama URL with query string + custom proxy NDJSON
+    s_ol_q = parse_llm_interaction(
+        "http://localhost:11434/api/chat?keep_alive=5m",
+        {},
+        {
+            "model": "llama3.2",
+            "message": {"content": "hi"},
+            "prompt_eval_count": 5,
+            "eval_count": 2,
+        },
+    )
+    assert s_ol_q.provider == "ollama"
+
+    s_ol_proxy = parse_llm_interaction(
+        "https://ollama-proxy.internal/custom",
+        {},
+        None,
+        stream_chunks=[
+            '{"model":"llama3.2","message":{"content":"proxied"},"done":true,"eval_count":4}\n'
+        ],
+        content_type="application/x-ndjson",
+    )
+    assert s_ol_proxy.provider == "ollama"
+    assert s_ol_proxy.text == "proxied"
+
+    # P2 #3: Raw deflate with 1-byte first TCP chunk
+    raw_sse = b'data: {"model":"gpt-4o-mini","choices":[{"delta":{"content":"1byte"}}]}\n\n'
+    comp = zlib.compressobj(level=6, method=zlib.DEFLATED, wbits=-zlib.MAX_WBITS)
+    raw_def = comp.compress(raw_sse) + comp.flush()
+
+    class _OneByteFirst(httpx.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            yield raw_def[:1]
+            yield raw_def[1:]
+
+    c_1b = tmp_path / "raw_def_1b.tape.json"
+    with tape(c_1b, mode="record") as session:
+        with httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream", "content-encoding": "deflate"},
+                    stream=_OneByteFirst(),
+                )
+            )
+        ) as client:
+            with client.stream("POST", "https://api.openai.com/v1/chat/completions", json={}) as r:
+                # Use iter_raw() because httpx's own DeflateDecoder doesn't buffer 1-byte headers
+                _ = list(r.iter_raw())
+        assert session.interactions[0].llm.text == "1byte"
+
+    # P2 #4: Provider-prefixed custom_pricing key matches + null price in JSON raises ValueError
+    assert estimate_cost_usd(
+        "openai/gpt-4o-mini",
+        1_000_000,
+        0,
+        custom_pricing={"openai/gpt-4o-mini": ModelPrice(9.0, 9.0)},
+    ) == pytest.approx(9.0)
+
+    null_price = tmp_path / "null_price.json"
+    null_price.write_text('{"m": {"input_per_million": null, "output_per_million": 1.0}}')
+    with pytest.raises(ValueError, match="numeric"):
+        load_pricing_file(null_price)
+    monkeypatch.setenv(PRICING_FILE_ENV, str(null_price))
+    assert estimate_cost_usd("gpt-4o-mini", 1_000_000, 0) == pytest.approx(0.15)
+
+    # P2 #5: scrub_body not called on empty GET/204 + cross-chunk SSE pattern redaction
+    c_empty = tmp_path / "empty_scrub.tape.json"
+    with tape(c_empty, mode="record", scrub_body=lambda b: {**b, "ok": True}):
+        with httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(204))) as client:
+            assert client.get("https://api.example.com/ping").status_code == 204
+
+    class _SplitSecretSSE(httpx.SyncByteStream):
+        def __iter__(self) -> Iterator[bytes]:
+            yield b'data: {"model":"gpt-4o-mini","choices":[{"delta":{"content":"key sk-spl'
+            yield b'it999"}}]}\n\n'
+
+    c_split = tmp_path / "split_secret.tape.json"
+    with tape(c_split, mode="record", redact_patterns=[r"sk-[a-z0-9]+"]):
+        with httpx.Client(
+            transport=httpx.MockTransport(
+                lambda r: httpx.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    stream=_SplitSecretSSE(),
+                )
+            )
+        ) as client:
+            with client.stream("POST", "https://api.openai.com/v1/chat/completions", json={}) as r:
+                _ = list(r.iter_bytes())
+    assert "sk-split999" not in c_split.read_text(encoding="utf-8")
+
+    # P2 #6: CLI redact invalid regex returns 1 cleanly + dry-run doesn't dirty custom match_on
+    assert cli_main(["redact", str(c_field), "--pattern", "[invalid"]) == 1
+    assert "Error:" in capsys.readouterr().err
+
+    c_custom_fp = tmp_path / "custom_fp.tape.json"
+    with tape(c_custom_fp, mode="record", match_on=("method", "path")):
+        with httpx.Client(transport=httpx.MockTransport(multi_handler)) as client:
+            client.get("https://api.example.com/a")
+    assert cli_main(["redact", str(c_custom_fp), "--dry-run"]) == 0
+    assert "0/1 cassette(s) updated" in capsys.readouterr().out

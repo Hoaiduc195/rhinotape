@@ -129,14 +129,13 @@ class _StreamContentDecoder:
         self._mode = "identity"
         self._zlib_obj: Any = None
         self._brotli_obj: Any = None
-        self._deflate_first_chunk = False
+        self._deflate_pending: bytearray | None = None
         if enc in {"gzip", "x-gzip"}:
             self._mode = "zlib"
             self._zlib_obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
         elif enc == "deflate":
             self._mode = "zlib"
-            self._zlib_obj = zlib.decompressobj(zlib.MAX_WBITS)
-            self._deflate_first_chunk = True
+            self._deflate_pending = bytearray()
         elif enc == "br":
             try:
                 import brotli  # type: ignore[import-not-found]
@@ -154,18 +153,29 @@ class _StreamContentDecoder:
             except ImportError:
                 self._mode = "identity"
 
+    def _init_deflate(self, data: bytes) -> bytes:
+        self._deflate_pending = None
+        try:
+            obj = zlib.decompressobj(zlib.MAX_WBITS)
+            out = obj.decompress(data)
+            self._zlib_obj = obj
+            return bytes(out)
+        except zlib.error:
+            # Fallback to raw deflate (RFC 1951 without zlib wrapper)
+            obj = zlib.decompressobj(-zlib.MAX_WBITS)
+            out = obj.decompress(data)
+            self._zlib_obj = obj
+            return bytes(out)
+
     def decompress(self, chunk: bytes) -> bytes:
         if not chunk or self._mode == "identity":
             return chunk
         if self._mode == "zlib":
-            if self._deflate_first_chunk:
-                self._deflate_first_chunk = False
-                try:
-                    return bytes(self._zlib_obj.decompress(chunk))
-                except zlib.error:
-                    # Fallback to raw deflate (RFC 1951 without zlib wrapper)
-                    self._zlib_obj = zlib.decompressobj(-zlib.MAX_WBITS)
-                    return bytes(self._zlib_obj.decompress(chunk))
+            if self._deflate_pending is not None:
+                self._deflate_pending.extend(chunk)
+                if len(self._deflate_pending) < 2:
+                    return b""
+                return self._init_deflate(bytes(self._deflate_pending))
             return bytes(self._zlib_obj.decompress(chunk))
         if self._mode == "brotli":
             return bytes(self._brotli_obj.process(chunk))
@@ -175,6 +185,12 @@ class _StreamContentDecoder:
 
     def flush(self) -> bytes:
         if self._mode == "zlib":
+            if self._deflate_pending is not None:
+                if not self._deflate_pending:
+                    self._deflate_pending = None
+                    return b""
+                out = self._init_deflate(bytes(self._deflate_pending))
+                return out + bytes(self._zlib_obj.flush())
             return bytes(self._zlib_obj.flush())
         if self._mode == "zstd":
             return bytes(self._zstd_obj.flush())
@@ -514,7 +530,7 @@ class TapeSession:
         clean_url = scrub_url(str(request.url), self.extra_sensitive_query_params)
         clean_headers = scrub_headers(request.headers.items(), self.extra_sensitive_headers)
         decoded_body, body_encoding = decode_body_with_encoding(body_bytes)
-        if body_encoding != "base64":
+        if body_encoding not in {"base64", "empty"}:
             decoded_body = redact_body(
                 decoded_body,
                 redact_fields=self.redact_fields,
@@ -544,7 +560,11 @@ class TapeSession:
             if self.custom_matcher is not None:
                 for pos, (orig_idx, candidate) in enumerate(self._custom_replay_list):
                     if self.custom_matcher(candidate.request, recorded_req):
-                        if self.allow_playback_repeats and len(self._custom_replay_list) == 1:
+                        has_later_match = self.allow_playback_repeats and any(
+                            self.custom_matcher(later.request, recorded_req)
+                            for _, later in self._custom_replay_list[pos + 1 :]
+                        )
+                        if self.allow_playback_repeats and not has_later_match:
                             interaction = candidate
                         else:
                             _, interaction = self._custom_replay_list.pop(pos)
@@ -691,7 +711,19 @@ class TapeSession:
 
         if stream_chunks is not None:
             if self.redact_patterns:
-                stream_chunks = [redact_text(c, self.redact_patterns) for c in stream_chunks]
+                per_chunk = [redact_text(c, self.redact_patterns) for c in stream_chunks]
+                joined_per_chunk = "".join(per_chunk)
+                joined_redacted = redact_text(joined_per_chunk, self.redact_patterns)
+                if joined_redacted != joined_per_chunk:
+                    # Secret spanned across TCP chunk boundary: re-split on SSE event boundaries
+                    parts = joined_redacted.split("\n\n")
+                    stream_chunks = [
+                        f"{p}\n\n" if i < len(parts) - 1 else p
+                        for i, p in enumerate(parts)
+                        if p or i < len(parts) - 1
+                    ]
+                else:
+                    stream_chunks = per_chunk
             chunks_tuple = tuple(stream_chunks)
             recorded_resp = RecordedResponse(
                 status_code=response.status_code,
@@ -710,7 +742,7 @@ class TapeSession:
             )
         else:
             decoded_resp_body, resp_encoding = decode_body_with_encoding(response_bytes or b"")
-            if resp_encoding != "base64":
+            if resp_encoding not in {"base64", "empty"}:
                 decoded_resp_body = redact_body(
                     decoded_resp_body,
                     redact_fields=self.redact_fields,

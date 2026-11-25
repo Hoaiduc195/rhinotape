@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import Sequence
 from typing import Any
+from urllib.parse import urlsplit
 
 from llm_tape.models import LLMCallSummary, ToolCall, Usage
 from llm_tape.pricing import ModelPrice, estimate_cost_usd
@@ -47,7 +48,8 @@ def _detect_provider(
         return "gemini"
     if "/converse" in lower_url and ("bedrock" in lower_url or "/model/" in lower_url):
         return "bedrock"
-    if lower_url.rstrip("/").endswith(("/api/chat", "/api/generate")):
+    url_path = urlsplit(lower_url).path.rstrip("/")
+    if url_path.endswith(("/api/chat", "/api/generate")):
         return "ollama"
     if (
         "openai.com" in lower_url
@@ -351,13 +353,14 @@ def _parse_bedrock_json(
             model = unquote(match.group(1))
 
     usage_data = response_body.get("usage") or {}
-    input_tokens = int(usage_data.get("inputTokens", 0) or 0)
+    cache_read = int(usage_data.get("cacheReadInputTokens", 0) or 0)
+    cache_write = int(usage_data.get("cacheWriteInputTokens", 0) or 0)
+    input_tokens = int(usage_data.get("inputTokens", 0) or 0) + cache_read + cache_write
     output_tokens = int(usage_data.get("outputTokens", 0) or 0)
-    cached_tokens = int(usage_data.get("cacheReadInputTokens", 0) or 0)
     usage = Usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
-        cached_input_tokens=cached_tokens,
+        cached_input_tokens=cache_read,
     )
 
     texts: list[str] = []
@@ -781,8 +784,7 @@ def parse_llm_interaction(
             "".join(stream_chunks) if stream_chunks is not None else str(response_body or "")
         )
         if _detect_provider(url, None) == "ollama" or is_ndjson:
-            if _detect_provider(url, None) == "ollama":
-                return _parse_ollama_ndjson(request_body, raw_stream, custom_pricing)
+            return _parse_ollama_ndjson(request_body, raw_stream, custom_pricing)
         events = parse_sse_events(raw_stream)
         provider = _detect_provider(url, None, events)
         if provider == "openai":
