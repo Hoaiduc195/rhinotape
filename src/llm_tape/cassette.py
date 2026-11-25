@@ -372,6 +372,37 @@ class Cassette:
             metadata=metadata,
         )
 
+    def to_bytes(self, *, compress: bool = False, indent: int | None = 2) -> bytes:
+        """Serialize this cassette to UTF-8 JSON bytes (optionally gzip-compressed)."""
+        serialized = self.to_json(indent=indent).encode("utf-8")
+        return gzip.compress(serialized, mtime=0) if compress else serialized
+
+    @classmethod
+    def from_bytes(
+        cls,
+        raw_bytes: bytes,
+        *,
+        path: str | Path = Path("memory.tape.json"),
+        max_bytes: int | None = None,
+    ) -> Cassette:
+        """Deserialize a Cassette from plain UTF-8 or gzip-compressed bytes."""
+        cassette_path = Path(path)
+        limit = MAX_CASSETTE_BYTES if max_bytes is None else max_bytes
+        try:
+            if cassette_path.suffix.lower() == ".gz" or raw_bytes[:2] == _GZIP_MAGIC:
+                text = _decompress_gzip_bounded(raw_bytes, max_bytes=limit).decode("utf-8")
+            else:
+                if len(raw_bytes) > limit:
+                    raise CorruptCassetteError(
+                        f"Cassette {cassette_path} exceeds safety size limit ({limit} bytes)."
+                    )
+                text = raw_bytes.decode("utf-8")
+        except CorruptCassetteError:
+            raise
+        except (OSError, gzip.BadGzipFile, zlib.error, EOFError, UnicodeDecodeError) as exc:
+            raise CorruptCassetteError(f"Failed to read cassette {cassette_path}: {exc}") from exc
+        return cls.from_json(text, path=cassette_path)
+
     @classmethod
     def load(cls, path: str | Path) -> Cassette:
         cassette_path = Path(path)
@@ -382,23 +413,13 @@ class Cassette:
             )
         try:
             raw_bytes = cassette_path.read_bytes()
-            if cassette_path.suffix.lower() == ".gz" or raw_bytes[:2] == _GZIP_MAGIC:
-                text = _decompress_gzip_bounded(raw_bytes).decode("utf-8")
-            else:
-                text = raw_bytes.decode("utf-8")
-        except CorruptCassetteError:
-            raise
-        except (OSError, gzip.BadGzipFile, zlib.error, EOFError, UnicodeDecodeError) as exc:
+        except OSError as exc:
             raise CorruptCassetteError(f"Failed to read cassette {cassette_path}: {exc}") from exc
-        return cls.from_json(text, path=cassette_path)
+        return cls.from_bytes(raw_bytes, path=cassette_path)
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        serialized = self.to_json(indent=2).encode("utf-8")
-        if self.path.suffix.lower() == ".gz":
-            data_bytes = gzip.compress(serialized, mtime=0)
-        else:
-            data_bytes = serialized
+        data_bytes = self.to_bytes(compress=self.path.suffix.lower() == ".gz")
 
         tmp_path: str | None = None
         try:
