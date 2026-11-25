@@ -25,6 +25,9 @@ from llm_tape.pricing import (
 )
 from llm_tape.scrubbing import (
     DEFAULT_MATCH_ON,
+    MATCH_PATH_AND_BODY,
+    MATCH_RELAXED,
+    MATCH_STRICT,
     PII_CREDIT_CARD,
     PII_EMAIL,
     PII_IPV4,
@@ -49,6 +52,9 @@ __all__ = [
     "DEFAULT_PRICING",
     "Interaction",
     "LLMCallSummary",
+    "MATCH_PATH_AND_BODY",
+    "MATCH_RELAXED",
+    "MATCH_STRICT",
     "ModelPrice",
     "PII_CREDIT_CARD",
     "PII_EMAIL",

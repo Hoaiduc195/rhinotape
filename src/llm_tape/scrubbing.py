@@ -21,6 +21,9 @@ VALID_MATCH_ON: frozenset[str] = frozenset(
     {"method", "url", "host", "path", "query", "body", "headers"}
 )
 DEFAULT_MATCH_ON: tuple[str, ...] = ("method", "url", "body")
+MATCH_STRICT: tuple[str, ...] = ("method", "url", "body", "headers")
+MATCH_RELAXED: tuple[str, ...] = ("method", "path")
+MATCH_PATH_AND_BODY: tuple[str, ...] = ("method", "path", "body")
 
 DEFAULT_SENSITIVE_HEADERS: frozenset[str] = frozenset(
     {
