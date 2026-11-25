@@ -1602,6 +1602,67 @@ def _cmd_search(
     return 0
 
 
+def _cmd_replay_check(target: Path, *, as_json: bool = False) -> int:
+    """Verify stored request fingerprints match recomputed fingerprints across cassettes."""
+    if not target.exists():
+        print(f"Error: path not found: {target}", file=sys.stderr)
+        return 1
+    files = [target] if target.is_file() else iter_cassette_files(target)
+    if not files:
+        if as_json:
+            print(json.dumps({"checked": 0, "mismatches": [], "errors": []}, indent=2))
+        else:
+            print(f"No .tape.json cassettes found in {target}")
+        return 0
+
+    checked = 0
+    mismatches: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for file_path in files:
+        rel = str(file_path.relative_to(target)) if target.is_dir() else file_path.name
+        try:
+            cassette = Cassette.load(file_path)
+        except CorruptCassetteError as exc:
+            errors.append({"cassette": rel, "error": str(exc)})
+            continue
+        for idx, inter in enumerate(cassette.interactions, start=1):
+            checked += 1
+            expected_fp = fingerprint_request(
+                inter.request.method,
+                inter.request.url,
+                inter.request.body,
+                headers=inter.request.headers,
+            )
+            if inter.request.fingerprint != expected_fp:
+                mismatches.append(
+                    {
+                        "cassette": rel,
+                        "index": idx,
+                        "stored": inter.request.fingerprint,
+                        "expected": expected_fp,
+                    }
+                )
+
+    if as_json:
+        print(
+            json.dumps({"checked": checked, "mismatches": mismatches, "errors": errors}, indent=2)
+        )
+        return 1 if (mismatches or errors) else 0
+
+    for err in errors:
+        print(f"ERROR: {err['cassette']}: {err['error']}", file=sys.stderr)
+    for m in mismatches:
+        print(
+            f"MISMATCH: {m['cassette']}[{m['index']}] "
+            f"stored={m['stored']} expected={m['expected']}",
+            file=sys.stderr,
+        )
+    if mismatches or errors:
+        return 1
+    print(f"OK: {checked} interaction(s) across {len(files)} cassette(s) have valid fingerprints.")
+    return 0
+
+
 def _cmd_schema(*, output: Path | None = None) -> int:
     """Output the Draft 2020-12 JSON Schema for .tape.json cassettes."""
     rendered = json.dumps(cassette_json_schema(), indent=2, ensure_ascii=False) + "\n"
@@ -2076,6 +2137,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--status", type=int, default=None, help="Filter by HTTP status code.")
     p_search.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
 
+    p_rcheck = sub.add_parser(
+        "replay-check",
+        help="Verify stored request fingerprints match recomputed fingerprints.",
+    )
+    p_rcheck.add_argument("target", type=Path, nargs="?", default=Path("."))
+    p_rcheck.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
+
     return parser
 
 
@@ -2171,6 +2239,8 @@ def main(argv: list[str] | None = None) -> int:
                 status=args.status,
                 as_json=args.as_json,
             )
+        if args.command == "replay-check":
+            return _cmd_replay_check(args.target, as_json=args.as_json)
     except (TapeError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
