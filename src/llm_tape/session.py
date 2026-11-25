@@ -8,6 +8,7 @@ import contextvars
 import fnmatch
 import functools
 import inspect
+import json
 import math
 import re
 import threading
@@ -1444,6 +1445,55 @@ class TapeSession:
                 f"Latency budget exceeded: slowest call took {max(slow):.2f}ms "
                 f"(limit: {max_ms:.2f}ms)."
             )
+
+    def assert_json_output(
+        self,
+        *,
+        required_keys: Iterable[str] = (),
+        predicate: Callable[[Any], bool] | None = None,
+        call_index: int = -1,
+    ) -> Any:
+        """Assert that an LLM response text is valid JSON (optionally checking keys/predicate)."""
+        interactions = self.interactions
+        if not interactions:
+            raise TapeAssertionError(
+                "Expected JSON LLM output, but no interactions were recorded/replayed."
+            )
+        try:
+            target = interactions[call_index]
+        except IndexError as exc:
+            raise TapeAssertionError(
+                f"call_index {call_index} out of range for {len(interactions)} interaction(s)."
+            ) from exc
+
+        raw_text = target.llm.text.strip()
+        if raw_text.startswith("```"):
+            lines = raw_text.splitlines()
+            if len(lines) >= 2 and lines[-1].strip() == "```":
+                raw_text = "\n".join(lines[1:-1]).strip()
+        try:
+            parsed = json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            raise TapeAssertionError(
+                f"Expected valid JSON in LLM response text, got decode error: {exc}. "
+                f"Raw text: {target.llm.text!r}"
+            ) from exc
+
+        req_keys = list(required_keys)
+        if req_keys:
+            if not isinstance(parsed, dict):
+                raise TapeAssertionError(
+                    f"Expected JSON object with keys {req_keys}, got {type(parsed).__name__}."
+                )
+            missing = [k for k in req_keys if k not in parsed]
+            if missing:
+                raise TapeAssertionError(
+                    f"JSON output missing required key(s): {missing}. "
+                    f"Present keys: {sorted(parsed.keys())}"
+                )
+        if predicate is not None and not predicate(parsed):
+            raise TapeAssertionError(f"JSON output failed predicate check: {parsed!r}")
+        return parsed
 
 
 def tape(
