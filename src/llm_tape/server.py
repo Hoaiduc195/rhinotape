@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import http.server
 import json
+import math
 import threading
+import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from pathlib import Path
@@ -47,7 +49,9 @@ class TapeReplayServer:
         self.allow_playback_repeats = allow_playback_repeats
         self.ignore_fields = tuple(ignore_fields)
         self.match_on = match_on
-        self.replay_latency_scale = max(0.0, float(replay_latency_scale))
+        if not math.isfinite(replay_latency_scale) or replay_latency_scale < 0.0:
+            raise ValueError("replay_latency_scale must be a finite number >= 0.0")
+        self.replay_latency_scale = float(replay_latency_scale)
 
         self._lock = threading.Lock()
         self._queues: dict[str, deque[Interaction]] = defaultdict(deque)
@@ -130,12 +134,37 @@ class TapeReplayServer:
                 self._write_interaction(inter)
 
             def _write_interaction(self, inter: Interaction) -> None:
+                delay_s = (
+                    (inter.latency_ms * server_ref.replay_latency_scale) / 1000.0
+                    if server_ref.replay_latency_scale > 0.0 and inter.latency_ms > 0.0
+                    else 0.0
+                )
                 if inter.response.stream_chunks is not None:
-                    payload = "".join(inter.response.stream_chunks).encode("utf-8")
-                else:
-                    payload = encode_body_with_encoding(
-                        inter.response.body, inter.response.body_encoding
+                    chunks = inter.response.stream_chunks
+                    encoded_chunks = [c.encode("utf-8") for c in chunks]
+                    total_len = sum(len(b) for b in encoded_chunks)
+                    chunk_delay = (
+                        delay_s / len(encoded_chunks) if (delay_s > 0 and encoded_chunks) else 0.0
                     )
+                    self.send_response(inter.response.status_code)
+                    for k, v in inter.response.headers.items():
+                        if k.lower() not in _STRIP_HEADERS:
+                            self.send_header(k, v)
+                    self.send_header("Content-Length", str(total_len))
+                    self.end_headers()
+                    for chunk_bytes in encoded_chunks:
+                        if chunk_delay > 0.0:
+                            time.sleep(chunk_delay)
+                        if chunk_bytes:
+                            self.wfile.write(chunk_bytes)
+                            self.wfile.flush()
+                    return
+
+                if delay_s > 0.0:
+                    time.sleep(delay_s)
+                payload = encode_body_with_encoding(
+                    inter.response.body, inter.response.body_encoding
+                )
                 self.send_response(inter.response.status_code)
                 for k, v in inter.response.headers.items():
                     if k.lower() not in _STRIP_HEADERS:
