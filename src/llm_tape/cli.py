@@ -203,6 +203,7 @@ def _cmd_summary(
     as_json: bool = False,
     max_cost: float | None = None,
     max_tokens: int | None = None,
+    group_by: str = "file",
 ) -> int:
     if not directory.exists():
         print(f"Error: directory not found: {directory}", file=sys.stderr)
@@ -251,6 +252,64 @@ def _cmd_summary(
             f"Budget exceeded: total cost ${grand_cost:.6f} > --max-cost ${max_cost:.6f}",
             file=sys.stderr,
         )
+
+    if group_by == "dir":
+        dir_buckets: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            parent = Path(str(row["relative_path"])).parent.as_posix()
+            b = dir_buckets.setdefault(
+                parent,
+                {
+                    "directory": parent,
+                    "files": 0,
+                    "calls": 0,
+                    "total_tokens": 0,
+                    "estimated_cost_usd": 0.0,
+                },
+            )
+            b["files"] += 1
+            b["calls"] += int(row["calls"])
+            b["total_tokens"] += int(row["total_tokens"])
+            b["estimated_cost_usd"] = round(
+                float(b["estimated_cost_usd"]) + float(row["estimated_cost_usd"]), 8
+            )
+        grouped_rows = sorted(
+            dir_buckets.values(),
+            key=lambda r: (-float(r["estimated_cost_usd"]), str(r["directory"])),
+        )
+        if as_json:
+            print(
+                json.dumps(
+                    {
+                        "groups": grouped_rows,
+                        "errors": errors,
+                        "totals": {
+                            "files": len(rows),
+                            "calls": grand_calls,
+                            "total_tokens": grand_tokens,
+                            "estimated_cost_usd": round(grand_cost, 8),
+                        },
+                    },
+                    indent=2,
+                )
+            )
+            return 1 if (errors or budget_exceeded) else 0
+        print(f"{'Directory':<42} {'Files':>5} {'Calls':>6} {'Tokens':>9} {'Est. Cost':>12}")
+        print("-" * 79)
+        for g in grouped_rows:
+            dlabel = str(g["directory"])
+            if len(dlabel) > 42:
+                dlabel = "..." + dlabel[-39:]
+            print(
+                f"{dlabel:<42} {g['files']:>5} {g['calls']:>6} {g['total_tokens']:>9} "
+                f"${g['estimated_cost_usd']:>11.6f}"
+            )
+        print("-" * 79)
+        print(
+            f"{f'TOTAL ({len(grouped_rows)} dirs)':<42} {len(rows):>5} {grand_calls:>6} "
+            f"{grand_tokens:>9} ${grand_cost:>11.6f}"
+        )
+        return 1 if (errors or budget_exceeded) else 0
 
     if as_json:
         print(
@@ -2022,6 +2081,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Fail with exit code 1 if total tokens exceed this limit.",
     )
+    p_summary.add_argument(
+        "--group-by",
+        choices=["file", "dir"],
+        default="file",
+        help="Group summary rows by file (default) or parent directory.",
+    )
 
     p_verify = sub.add_parser(
         "verify",
@@ -2386,6 +2451,7 @@ def main(argv: list[str] | None = None) -> int:
                 as_json=args.as_json,
                 max_cost=args.max_cost,
                 max_tokens=args.max_tokens,
+                group_by=args.group_by,
             )
         if args.command == "verify":
             return _cmd_verify(
