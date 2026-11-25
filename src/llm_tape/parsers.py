@@ -64,6 +64,8 @@ def _detect_provider(
         or "api.fireworks.ai" in lower_url
         or "api.x.ai" in lower_url
         or "api.perplexity.ai" in lower_url
+        or "api-inference.huggingface.co" in lower_url
+        or "router.huggingface.co" in lower_url
         or "/chat/completions" in lower_url
         or "/fim/completions" in lower_url
         or "/responses" in lower_url
