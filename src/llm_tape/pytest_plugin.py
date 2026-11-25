@@ -153,6 +153,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Fail the pytest session if total LLM tokens exceed this limit.",
         default="",
     )
+    parser.addini(
+        "tape_redact_pii",
+        help=(
+            "Default PII redaction ('true'/'all', or comma-separated presets: "
+            "email,phone,ssn,credit_card,ipv4,jwt)."
+        ),
+        default="",
+    )
 
 
 def _resolve_max_cost(config: pytest.Config) -> float | None:
@@ -433,6 +441,15 @@ def _resolve_cassette_dir(request: pytest.FixtureRequest) -> Path:
     return base_dir / file_slug
 
 
+def _parse_redact_pii_setting(raw: str) -> bool | list[str]:
+    cleaned = raw.strip().lower()
+    if not cleaned or cleaned in {"false", "0", "no", "off"}:
+        return False
+    if cleaned in {"true", "1", "yes", "on", "all"}:
+        return True
+    return [part.strip() for part in cleaned.split(",") if part.strip()]
+
+
 @pytest.fixture
 def llm_tape_dir(request: pytest.FixtureRequest) -> Path:
     """Return the resolved cassette directory Path for the current test module."""
@@ -491,6 +508,14 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
     ignore_fields = (*ini_ignore_fields, *marker_kwargs.get("ignore_fields", ()))
     ignore_query_params = (*ini_ignore_query_params, *marker_kwargs.get("ignore_query_params", ()))
 
+    if "redact_pii" in marker_kwargs:
+        redact_pii: Any = marker_kwargs["redact_pii"]
+    else:
+        raw_pii = os.environ.get("LLM_TAPE_REDACT_PII", "").strip() or str(
+            request.config.getini("tape_redact_pii") or ""
+        )
+        redact_pii = _parse_redact_pii_setting(raw_pii)
+
     session = TapeSession(
         cassette_path,
         mode=mode,
@@ -501,7 +526,7 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
         ignore_json_array_order=marker_kwargs.get("ignore_json_array_order", ()),
         redact_fields=marker_kwargs.get("redact_fields", ()),
         redact_patterns=marker_kwargs.get("redact_patterns", ()),
-        redact_pii=marker_kwargs.get("redact_pii", False),
+        redact_pii=redact_pii,
         redact_url_patterns=marker_kwargs.get("redact_url_patterns", ()),
         scrub_body=marker_kwargs.get("scrub_body"),
         match_on=marker_kwargs.get("match_on") or DEFAULT_MATCH_ON,
