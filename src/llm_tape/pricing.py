@@ -87,6 +87,11 @@ DEFAULT_PRICING: dict[str, ModelPrice] = {
     "grok-3": ModelPrice(3.00, 15.00, cached_input_per_million=0.75),
     "grok-3-mini": ModelPrice(0.30, 0.50, cached_input_per_million=0.075),
     "grok-2": ModelPrice(2.00, 10.00),
+    # Perplexity
+    "sonar": ModelPrice(1.00, 1.00),
+    "sonar-pro": ModelPrice(3.00, 15.00),
+    "sonar-reasoning": ModelPrice(1.00, 5.00),
+    "sonar-reasoning-pro": ModelPrice(2.00, 8.00),
 }
 
 
