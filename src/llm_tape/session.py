@@ -1062,9 +1062,54 @@ class TapeSession:
 
     def assert_cost_under(self, max_usd: float) -> None:
         actual = self.total_cost_usd
-        if actual > max_usd:
+        if round(actual, 8) > max_usd:
             raise TapeAssertionError(
                 f"Cost budget exceeded: estimated ${actual:.6f} (limit: ${max_usd:.6f})."
+            )
+
+    def assert_cached_tokens_at_least(self, min_cached: int) -> None:
+        actual = self.total_usage.cached_input_tokens
+        if actual < min_cached:
+            raise TapeAssertionError(
+                f"Expected at least {min_cached} cached input token(s), but observed {actual}."
+            )
+
+    def assert_model(self, expected_model: str) -> None:
+        interactions = self.interactions
+        if not interactions:
+            raise TapeAssertionError(
+                f"Expected model {expected_model!r}, but no interactions were recorded/replayed."
+            )
+        mismatched = [i.llm.model for i in interactions if i.llm.model != expected_model]
+        if mismatched:
+            raise TapeAssertionError(
+                f"Model mismatch: expected {expected_model!r} for all calls, "
+                f"but observed {[i.llm.model for i in interactions]}."
+            )
+
+    def assert_provider(self, expected_provider: str) -> None:
+        interactions = self.interactions
+        if not interactions:
+            raise TapeAssertionError(
+                f"Expected provider {expected_provider!r}, "
+                "but no interactions were recorded/replayed."
+            )
+        mismatched = [i.llm.provider for i in interactions if i.llm.provider != expected_provider]
+        if mismatched:
+            raise TapeAssertionError(
+                f"Provider mismatch: expected {expected_provider!r} for all calls, "
+                f"but observed {[i.llm.provider for i in interactions]}."
+            )
+
+    def assert_no_errors(self) -> None:
+        failed = [
+            f"{i.request.method} {i.request.url} -> {i.response.status_code}"
+            for i in self.interactions
+            if i.response.status_code >= 400
+        ]
+        if failed:
+            raise TapeAssertionError(
+                f"Expected all HTTP calls to succeed (< 400), but got error(s): {failed}."
             )
 
     def assert_tool_called(self, name: str, *, min_times: int = 1) -> None:

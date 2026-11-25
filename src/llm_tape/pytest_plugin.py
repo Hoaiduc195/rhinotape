@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import math
+import os
 import re
+import tempfile
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
@@ -17,6 +21,8 @@ from llm_tape.session import TapeSession
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _MAX_STEM_LEN = 120
 _FAILED_ATTR = "_llm_tape_call_failed"
+_REPORT_KEY: pytest.StashKey[list[dict[str, Any]]] = pytest.StashKey()
+_VIOLATIONS_KEY: pytest.StashKey[list[str]] = pytest.StashKey()
 
 
 def _sanitize_segment(name: str, *, unique_seed: str | None = None) -> str:
@@ -50,6 +56,32 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store_true",
         default=False,
         help="Write gzip-compressed .tape.json.gz cassettes.",
+    )
+    group.addoption(
+        "--tape-report",
+        action="store_true",
+        default=False,
+        help="Print a per-test LLM token and cost summary table at the end of pytest.",
+    )
+    group.addoption(
+        "--tape-json-report",
+        action="store",
+        default=None,
+        help="Write a machine-readable JSON token/cost report to the given file path.",
+    )
+    group.addoption(
+        "--tape-max-cost",
+        action="store",
+        type=float,
+        default=None,
+        help="Fail the pytest session if total estimated LLM USD cost exceeds this limit.",
+    )
+    group.addoption(
+        "--tape-max-tokens",
+        action="store",
+        type=int,
+        default=None,
+        help="Fail the pytest session if total LLM tokens exceed this limit.",
     )
 
     parser.addini(
@@ -95,14 +127,142 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
 
 def pytest_configure(config: pytest.Config) -> None:
+    config.stash[_REPORT_KEY] = []
+    config.stash[_VIOLATIONS_KEY] = []
+
+    max_cost = config.getoption("--tape-max-cost", default=None)
+    if max_cost is not None and (not math.isfinite(max_cost) or max_cost < 0.0):
+        raise pytest.UsageError("--tape-max-cost must be a finite number >= 0.")
+    max_tokens = config.getoption("--tape-max-tokens", default=None)
+    if max_tokens is not None and max_tokens < 0:
+        raise pytest.UsageError("--tape-max-tokens must be >= 0.")
+
     config.addinivalue_line(
         "markers",
         "tape(name=None, mode=None, compress=None, ignore_localhost=None, ignore_hosts=(), "
         "ignore_fields=(), ignore_query_params=(), redact_fields=(), redact_patterns=(), "
         "scrub_body=None, match_on=None, custom_matcher=None, replay_latency_scale=0.0, "
-        "allow_playback_repeats=False, save_on_error=False): "
+        "allow_playback_repeats=False, save_on_error=False, patch_requests=True): "
         "configure cassette options for the llm_tape fixture.",
     )
+
+
+def _compute_report_totals(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "tests": len(entries),
+        "calls": sum(int(e["calls"]) for e in entries),
+        "input_tokens": sum(int(e["input_tokens"]) for e in entries),
+        "cached_input_tokens": sum(int(e["cached_input_tokens"]) for e in entries),
+        "output_tokens": sum(int(e["output_tokens"]) for e in entries),
+        "total_tokens": sum(int(e["total_tokens"]) for e in entries),
+        "estimated_cost_usd": round(sum(float(e["estimated_cost_usd"]) for e in entries), 8),
+        "latency_ms": round(sum(float(e["latency_ms"]) for e in entries), 2),
+    }
+
+
+def _write_json_report_atomic(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    tmp_path: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.stem}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp_path = tmp.name
+            tmp.write(data)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    del exitstatus
+    entries = session.config.stash.get(_REPORT_KEY, [])
+    totals = _compute_report_totals(entries)
+
+    violations: list[str] = []
+    max_tokens = session.config.getoption("--tape-max-tokens", default=None)
+    max_cost = session.config.getoption("--tape-max-cost", default=None)
+
+    if max_tokens is not None and int(totals["total_tokens"]) > max_tokens:
+        violations.append(
+            f"LLM token budget exceeded: {totals['total_tokens']} > --tape-max-tokens {max_tokens}"
+        )
+    if max_cost is not None and round(float(totals["estimated_cost_usd"]), 8) > max_cost:
+        violations.append(
+            f"LLM cost budget exceeded: ${totals['estimated_cost_usd']:.6f} "
+            f"> --tape-max-cost ${max_cost:.6f}"
+        )
+
+    session.config.stash[_VIOLATIONS_KEY] = violations
+    if violations and session.exitstatus == pytest.ExitCode.OK:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+    json_report_path = session.config.getoption("--tape-json-report", default=None)
+    if json_report_path:
+        _write_json_report_atomic(
+            Path(str(json_report_path)),
+            {
+                "tests": entries,
+                "totals": totals,
+                "budget_violations": violations,
+            },
+        )
+
+
+def pytest_terminal_summary(
+    terminalreporter: Any,
+    exitstatus: int,
+    config: pytest.Config,
+) -> None:
+    del exitstatus
+    show_report = bool(config.getoption("--tape-report", default=False))
+    entries = config.stash.get(_REPORT_KEY, [])
+    violations = config.stash.get(_VIOLATIONS_KEY, [])
+
+    if not show_report and not violations:
+        return
+
+    totals = _compute_report_totals(entries)
+    terminalreporter.write_sep("=", "llm-tape summary")
+    if show_report:
+        if entries:
+            terminalreporter.write_line(
+                f"{'Test':<52} {'Mode':<9} {'Calls':>5} {'Tokens':>8} {'Cached':>7} {'Cost':>11}"
+            )
+            terminalreporter.write_line("-" * 97)
+            for row in entries:
+                nodeid = str(row["nodeid"])
+                if len(nodeid) > 52:
+                    nodeid = "..." + nodeid[-49:]
+                terminalreporter.write_line(
+                    f"{nodeid:<52} {row['action']:<9} {row['calls']:>5} "
+                    f"{row['total_tokens']:>8} {row['cached_input_tokens']:>7} "
+                    f"${row['estimated_cost_usd']:>10.6f}"
+                )
+            terminalreporter.write_line("-" * 97)
+            total_label = f"TOTAL ({totals['tests']} tests)"
+            terminalreporter.write_line(
+                f"{total_label:<62} {totals['calls']:>5} "
+                f"{totals['total_tokens']:>8} {totals['cached_input_tokens']:>7} "
+                f"${totals['estimated_cost_usd']:>10.6f}"
+            )
+        else:
+            terminalreporter.write_line("No llm_tape sessions executed.")
+
+    for msg in violations:
+        terminalreporter.write_line(f"FAILED: {msg}", red=True, bold=True)
 
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
@@ -204,4 +364,27 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
         yield session
     finally:
         test_failed = bool(getattr(request.node, _FAILED_ATTR, False))
+        action = (
+            "recorded"
+            if session._is_recording
+            else ("replayed" if session._is_replaying else "none")
+        )
         session._finalize(exc_occurred=test_failed)
+        usage = session.total_usage
+        interactions = session.interactions
+        entries = request.config.stash.get(_REPORT_KEY, None)
+        if entries is not None:
+            entries.append(
+                {
+                    "nodeid": request.node.nodeid,
+                    "cassette": str(cassette_path),
+                    "action": action,
+                    "calls": len(interactions),
+                    "input_tokens": usage.input_tokens,
+                    "cached_input_tokens": usage.cached_input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "total_tokens": usage.total_tokens,
+                    "estimated_cost_usd": round(session.total_cost_usd, 8),
+                    "latency_ms": round(sum(i.latency_ms for i in interactions), 2),
+                }
+            )
