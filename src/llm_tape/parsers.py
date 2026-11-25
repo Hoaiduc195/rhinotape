@@ -55,6 +55,11 @@ def _detect_provider(
         "openai.com" in lower_url
         or "openai.azure.com" in lower_url
         or "openrouter.ai" in lower_url
+        or "deepseek.com" in lower_url
+        or "api.groq.com" in lower_url
+        or "api.mistral.ai" in lower_url
+        or "api.together.xyz" in lower_url
+        or "api.fireworks.ai" in lower_url
         or "/chat/completions" in lower_url
         or "/responses" in lower_url
     ):
@@ -144,10 +149,14 @@ def _parse_openai_json(
 
     tool_calls: list[ToolCall] = []
     texts: list[str] = []
+    thinking_parts: list[str] = []
 
     for choice in response_body.get("choices", []) or []:
         msg = choice.get("message") or {}
         texts.extend(_extract_openai_text(msg.get("content")))
+        rc = msg.get("reasoning_content") or msg.get("reasoning")
+        if isinstance(rc, str) and rc:
+            thinking_parts.append(rc)
         for tc in msg.get("tool_calls") or []:
             fn = tc.get("function") or {}
             if fn.get("name"):
@@ -188,6 +197,7 @@ def _parse_openai_json(
         estimated_cost_usd=cost,
         tool_calls=tuple(tool_calls),
         text="\n".join(texts),
+        thinking="\n".join(thinking_parts),
     )
 
 
@@ -215,12 +225,15 @@ def _parse_anthropic_json(
 
     tool_calls: list[ToolCall] = []
     texts: list[str] = []
+    thinking_parts: list[str] = []
     for block in response_body.get("content") or []:
         if not isinstance(block, dict):
             continue
         btype = block.get("type")
         if btype == "text" and isinstance(block.get("text"), str):
             texts.append(block["text"])
+        elif btype == "thinking" and isinstance(block.get("thinking"), str):
+            thinking_parts.append(block["thinking"])
         elif btype == "tool_use" and block.get("name"):
             tool_calls.append(
                 ToolCall(
@@ -244,6 +257,7 @@ def _parse_anthropic_json(
         estimated_cost_usd=cost,
         tool_calls=tuple(tool_calls),
         text="\n".join(texts),
+        thinking="\n".join(thinking_parts),
     )
 
 
@@ -272,13 +286,17 @@ def _parse_gemini_json(
 
     tool_calls: list[ToolCall] = []
     texts: list[str] = []
+    thinking_parts: list[str] = []
     for cand in response_body.get("candidates") or []:
         content = cand.get("content") or {}
         for part in content.get("parts") or []:
             if not isinstance(part, dict):
                 continue
             if isinstance(part.get("text"), str):
-                texts.append(part["text"])
+                if part.get("thought") is True:
+                    thinking_parts.append(part["text"])
+                else:
+                    texts.append(part["text"])
             fn_call = part.get("functionCall")
             if isinstance(fn_call, dict) and fn_call.get("name"):
                 tool_calls.append(
@@ -302,6 +320,7 @@ def _parse_gemini_json(
         estimated_cost_usd=cost,
         tool_calls=tuple(tool_calls),
         text="\n".join(texts),
+        thinking="\n".join(thinking_parts),
     )
 
 
@@ -469,6 +488,7 @@ def _parse_openai_sse(
     cached_tokens = 0
     reasoning_tokens = 0
     text_parts: list[str] = []
+    thinking_parts: list[str] = []
     # index -> {"id": str|None, "name": str, "args": list[str]}
     tool_acc: dict[int, dict[str, Any]] = {}
     responses_calls: list[ToolCall] = []
@@ -527,6 +547,9 @@ def _parse_openai_sse(
             delta = choice.get("delta") or {}
             if isinstance(delta.get("content"), str):
                 text_parts.append(delta["content"])
+            rc = delta.get("reasoning_content") or delta.get("reasoning")
+            if isinstance(rc, str) and rc:
+                thinking_parts.append(rc)
             for tc in delta.get("tool_calls") or []:
                 idx = int(tc.get("index", 0))
                 slot = tool_acc.setdefault(idx, {"id": None, "name": "", "args": []})
@@ -567,6 +590,7 @@ def _parse_openai_sse(
         estimated_cost_usd=cost,
         tool_calls=tool_calls,
         text="".join(text_parts),
+        thinking="".join(thinking_parts),
         is_stream=True,
     )
 
@@ -582,6 +606,7 @@ def _parse_anthropic_sse(
     cached_tokens = 0
     reasoning_tokens = 0
     text_parts: list[str] = []
+    thinking_parts: list[str] = []
     tool_acc: dict[int, dict[str, Any]] = {}
 
     for ev_name, payload in events:
@@ -616,6 +641,8 @@ def _parse_anthropic_sse(
             dtype = delta.get("type")
             if dtype == "text_delta" and isinstance(delta.get("text"), str):
                 text_parts.append(delta["text"])
+            elif dtype == "thinking_delta" and isinstance(delta.get("thinking"), str):
+                thinking_parts.append(delta["thinking"])
             elif dtype == "input_json_delta" and isinstance(delta.get("partial_json"), str):
                 if idx in tool_acc:
                     tool_acc[idx]["args"].append(delta["partial_json"])
@@ -653,6 +680,7 @@ def _parse_anthropic_sse(
         estimated_cost_usd=cost,
         tool_calls=tool_calls,
         text="".join(text_parts),
+        thinking="".join(thinking_parts),
         is_stream=True,
     )
 
@@ -672,6 +700,7 @@ def _parse_gemini_sse(
     cached_tokens = 0
     reasoning_tokens = 0
     text_parts: list[str] = []
+    thinking_parts: list[str] = []
     tool_calls: list[ToolCall] = []
 
     for _ev, payload in events:
@@ -694,7 +723,10 @@ def _parse_gemini_sse(
                 if not isinstance(part, dict):
                     continue
                 if isinstance(part.get("text"), str):
-                    text_parts.append(part["text"])
+                    if part.get("thought") is True:
+                        thinking_parts.append(part["text"])
+                    else:
+                        text_parts.append(part["text"])
                 fn_call = part.get("functionCall")
                 if isinstance(fn_call, dict) and fn_call.get("name"):
                     tool_calls.append(
@@ -724,6 +756,7 @@ def _parse_gemini_sse(
         estimated_cost_usd=cost,
         tool_calls=tuple(tool_calls),
         text="".join(text_parts),
+        thinking="".join(thinking_parts),
         is_stream=True,
     )
 

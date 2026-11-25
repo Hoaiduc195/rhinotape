@@ -58,10 +58,18 @@ DEFAULT_PRICING: dict[str, ModelPrice] = {
     "claude-3-7-sonnet": ModelPrice(3.00, 15.00, cached_input_per_million=0.30),
     "claude-sonnet-4": ModelPrice(3.00, 15.00, cached_input_per_million=0.30),
     "claude-opus-4": ModelPrice(15.00, 75.00, cached_input_per_million=1.50),
+    "claude-haiku-4": ModelPrice(1.00, 5.00, cached_input_per_million=0.10),
     # Google Gemini
     "gemini-2.0-flash": ModelPrice(0.10, 0.40, cached_input_per_million=0.025),
     "gemini-2.5-flash": ModelPrice(0.15, 0.60, cached_input_per_million=0.0375),
+    "gemini-2.5-flash-lite": ModelPrice(0.10, 0.40, cached_input_per_million=0.025),
     "gemini-2.5-pro": ModelPrice(1.25, 10.00, cached_input_per_million=0.3125),
+    # DeepSeek
+    "deepseek-chat": ModelPrice(0.27, 1.10, cached_input_per_million=0.07),
+    "deepseek-reasoner": ModelPrice(0.55, 2.19, cached_input_per_million=0.14),
+    # Mistral
+    "mistral-large": ModelPrice(2.00, 6.00),
+    "mistral-small": ModelPrice(0.10, 0.30),
 }
 
 

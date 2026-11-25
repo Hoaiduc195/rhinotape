@@ -263,3 +263,153 @@ def test_cli_edge_error_paths(tmp_path: Path, capsys: pytest.CaptureFixture[str]
     # Prune dry-run human output with --older-than-days 0 on corrupt file (uses mtime)
     assert cli_main(["prune", str(corrupt_dir), "--older-than-days", "0"]) == 0
     assert "WOULD DELETE" in capsys.readouterr().out
+
+
+def test_thinking_blocks_anthropic_deepseek_gemini_and_redaction(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from llm_tape import Cassette, Interaction, RecordedRequest, RecordedResponse
+
+    # Anthropic extended thinking JSON & SSE
+    anth_json = parse_llm_interaction(
+        url="https://api.anthropic.com/v1/messages",
+        request_body={"model": "claude-sonnet-4"},
+        response_body={
+            "model": "claude-sonnet-4-20250514",
+            "content": [
+                {"type": "thinking", "thinking": "Step 1: analyze."},
+                {"type": "text", "text": "Final answer."},
+            ],
+            "usage": {"input_tokens": 50, "output_tokens": 30},
+        },
+    )
+    assert anth_json.thinking == "Step 1: analyze."
+    assert anth_json.text == "Final answer."
+
+    anth_sse = parse_llm_interaction(
+        url="https://api.anthropic.com/v1/messages",
+        request_body={"model": "claude-sonnet-4"},
+        response_body=None,
+        stream_chunks=(
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
+            '"delta":{"type":"thinking_delta","thinking":"Hmm... "}}\n\n',
+            'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,'
+            '"delta":{"type":"text_delta","text":"42"}}\n\n',
+        ),
+        content_type="text/event-stream",
+    )
+    assert anth_sse.thinking == "Hmm... "
+    assert anth_sse.text == "42"
+
+    # DeepSeek-R1 reasoning_content JSON & SSE + pricing
+    ds_json = parse_llm_interaction(
+        url="https://api.deepseek.com/chat/completions",
+        request_body={"model": "deepseek-reasoner"},
+        response_body={
+            "model": "deepseek-reasoner",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "reasoning_content": "Let me think.",
+                        "content": "Result.",
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 500},
+        },
+    )
+    assert ds_json.provider == "openai"
+    assert ds_json.thinking == "Let me think."
+    assert ds_json.text == "Result."
+    assert ds_json.estimated_cost_usd > 0
+
+    ds_sse = parse_llm_interaction(
+        url="https://api.deepseek.com/chat/completions",
+        request_body={"model": "deepseek-reasoner"},
+        response_body=None,
+        stream_chunks=(
+            'data: {"model":"deepseek-reasoner","choices":[{"delta":'
+            '{"reasoning_content":"step1 "}}]}\n\n',
+            'data: {"model":"deepseek-reasoner","choices":[{"delta":{"content":"ans"}}]}\n\n',
+            "data: [DONE]\n\n",
+        ),
+        content_type="text/event-stream",
+    )
+    assert ds_sse.thinking == "step1 "
+    assert ds_sse.text == "ans"
+
+    # Gemini thought=True parts routed to thinking, not text
+    gem = parse_llm_interaction(
+        url="https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent",
+        request_body={},
+        response_body={
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [
+                            {"text": "internal thought", "thought": True},
+                            {"text": "visible answer"},
+                        ]
+                    }
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 50,
+                "candidatesTokenCount": 10,
+                "thoughtsTokenCount": 40,
+            },
+        },
+    )
+    assert gem.thinking == "internal thought"
+    assert gem.text == "visible answer"
+
+    # Secret inside llm.thinking is caught by verify --check-secrets and scrubbed by redact
+    sec_key = "sk-proj-" + "Z" * 24
+    tape_path = tmp_path / "thinking_secret.tape.json"
+    summary = parse_llm_interaction(
+        url="https://api.anthropic.com/v1/messages",
+        request_body={"model": "claude-sonnet-4"},
+        response_body={
+            "model": "claude-sonnet-4",
+            "content": [
+                {"type": "thinking", "thinking": f"Saw key {sec_key}"},
+                {"type": "text", "text": "clean"},
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        },
+    )
+    Cassette(
+        path=tape_path,
+        interactions=[
+            Interaction(
+                request=RecordedRequest(
+                    method="POST",
+                    url="https://api.anthropic.com/v1/messages",
+                    headers={},
+                    body={"model": "claude-sonnet-4"},
+                    fingerprint="fp_t",
+                ),
+                response=RecordedResponse(
+                    status_code=200,
+                    headers={"content-type": "application/json"},
+                    body={
+                        "model": "claude-sonnet-4",
+                        "content": [
+                            {"type": "thinking", "thinking": f"Saw key {sec_key}"},
+                            {"type": "text", "text": "clean"},
+                        ],
+                    },
+                ),
+                llm=summary,
+            )
+        ],
+    ).save()
+
+    assert cli_main(["verify", str(tape_path), "--check-secrets"]) == 1
+    assert "llm.thinking" in capsys.readouterr().err
+
+    assert cli_main(["redact", str(tape_path), "--pattern", r"sk-proj-[A-Za-z0-9]+"]) == 0
+    capsys.readouterr()
+    assert cli_main(["verify", str(tape_path), "--check-secrets"]) == 0
+    assert sec_key not in Cassette.load(tape_path).interactions[0].llm.thinking

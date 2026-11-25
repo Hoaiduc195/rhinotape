@@ -289,6 +289,9 @@ def _scan_cassette_secrets(
                 _scan_text_for_secrets(joined, f"{prefix}.response.stream_chunks", patterns)
             )
         findings.extend(_scan_text_for_secrets(inter.llm.text, f"{prefix}.llm.text", patterns))
+        findings.extend(
+            _scan_text_for_secrets(inter.llm.thinking, f"{prefix}.llm.thinking", patterns)
+        )
         for tc_idx, tc in enumerate(inter.llm.tool_calls):
             findings.extend(
                 _scan_text_for_secrets(
@@ -925,14 +928,19 @@ def _cmd_redact(
                     content_type=new_resp.headers.get("content-type", ""),
                 )
                 base_text = reparsed.text if reparsed.provider != "unknown" else inter.llm.text
+                base_thinking = (
+                    reparsed.thinking if reparsed.provider != "unknown" else inter.llm.thinking
+                )
                 base_calls = (
                     reparsed.tool_calls if reparsed.provider != "unknown" else inter.llm.tool_calls
                 )
             else:
                 base_text = inter.llm.text
+                base_thinking = inter.llm.thinking
                 base_calls = inter.llm.tool_calls
 
             new_llm_text = redact_text(base_text, patterns) if patterns else base_text
+            new_llm_thinking = redact_text(base_thinking, patterns) if patterns else base_thinking
             new_tool_calls = tuple(
                 ToolCall(
                     name=tc.name,
@@ -950,6 +958,7 @@ def _cmd_redact(
                 estimated_cost_usd=inter.llm.estimated_cost_usd,
                 tool_calls=new_tool_calls,
                 text=new_llm_text,
+                thinking=new_llm_thinking,
                 is_stream=inter.llm.is_stream,
             )
             new_inter = Interaction(

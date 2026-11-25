@@ -111,10 +111,11 @@ class LLMCallSummary:
     estimated_cost_usd: float = 0.0
     tool_calls: tuple[ToolCall, ...] = ()
     text: str = ""
+    thinking: str = ""
     is_stream: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "provider": self.provider,
             "model": self.model,
             "usage": self.usage.to_dict(),
@@ -123,6 +124,9 @@ class LLMCallSummary:
             "text": self.text,
             "is_stream": self.is_stream,
         }
+        if self.thinking:
+            payload["thinking"] = self.thinking
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LLMCallSummary:
@@ -133,6 +137,7 @@ class LLMCallSummary:
             estimated_cost_usd=float(data.get("estimated_cost_usd", 0.0)),
             tool_calls=tuple(ToolCall.from_dict(tc) for tc in data.get("tool_calls", [])),
             text=str(data.get("text", "")),
+            thinking=str(data.get("thinking", "")),
             is_stream=bool(data.get("is_stream", False)),
         )
 
