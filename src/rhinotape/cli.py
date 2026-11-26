@@ -33,6 +33,12 @@ from rhinotape.cassette import (
     iter_cassette_files,
 )
 from rhinotape.codegen import generate_pytest_code
+from rhinotape.compare import (
+    compare_cassettes,
+    evaluate_compare_gates,
+    render_compare_markdown,
+    render_compare_text,
+)
 from rhinotape.graph import render_ascii_graph, render_mermaid_graph
 from rhinotape.models import (
     CorruptCassetteError,
@@ -2621,6 +2627,59 @@ def _cmd_gen_test(
     return 0
 
 
+def _cmd_compare(
+    baseline: Path,
+    candidate: Path,
+    *,
+    as_markdown: bool = False,
+    as_json: bool = False,
+    min_similarity: float | None = None,
+    max_cost_increase_pct: float | None = None,
+    fail_on_tool_drift: bool = False,
+) -> int:
+    """Compare baseline vs. candidate model cassettes and enforce optional CI gates."""
+    if as_markdown and as_json:
+        print("Error: --markdown and --json cannot be used together.", file=sys.stderr)
+        return 1
+    if min_similarity is not None and (
+        isinstance(min_similarity, bool)
+        or not math.isfinite(min_similarity)
+        or min_similarity < 0.0
+        or min_similarity > 1.0
+    ):
+        print(
+            "Error: --min-similarity must be a finite float between 0.0 and 1.0.", file=sys.stderr
+        )
+        return 1
+    if err := _validate_non_negative_float("--max-cost-increase-pct", max_cost_increase_pct):
+        print(err, file=sys.stderr)
+        return 1
+
+    try:
+        report = compare_cassettes(baseline, candidate)
+        violations = evaluate_compare_gates(
+            report,
+            min_similarity=min_similarity,
+            max_cost_increase_pct=max_cost_increase_pct,
+            fail_on_tool_drift=fail_on_tool_drift,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    passed = len(violations) == 0
+
+    if as_json:
+        payload = {**report.to_dict(), "passed": passed, "violations": violations}
+        print(json.dumps(payload, indent=2, allow_nan=False))
+        return 0 if passed else 1
+
+    rendered = render_compare_markdown(report) if as_markdown else render_compare_text(report)
+    sys.stdout.write(rendered)
+    for msg in violations:
+        print(f"Comparison gate failed: {msg}", file=sys.stderr)
+    return 0 if passed else 1
+
+
 def _build_cli_replay_server(
     source: Path,
     *,
@@ -3487,6 +3546,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Overwrite --output if it already exists.",
     )
 
+    p_compare = sub.add_parser(
+        "compare",
+        help="Compare baseline vs. candidate cassettes for model migrations and CI gates.",
+    )
+    p_compare.add_argument("baseline", type=Path, help="Baseline cassette file or directory.")
+    p_compare.add_argument("candidate", type=Path, help="Candidate cassette file or directory.")
+    p_compare.add_argument(
+        "--markdown",
+        action="store_true",
+        dest="as_markdown",
+        help="Render GitHub-Flavored Markdown report.",
+    )
+    p_compare.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
+    p_compare.add_argument(
+        "--min-similarity",
+        type=float,
+        default=None,
+        help="Fail if any matched pair has text similarity below threshold (0.0..1.0).",
+    )
+    p_compare.add_argument(
+        "--max-cost-increase-pct",
+        type=float,
+        default=None,
+        help="Fail if total estimated cost increases by more than percentage (>= 0).",
+    )
+    p_compare.add_argument(
+        "--fail-on-tool-drift",
+        action="store_true",
+        help="Fail if any matched cassette pair changes tool call sequence.",
+    )
+
     return parser
 
 
@@ -3660,6 +3750,16 @@ def main(argv: list[str] | None = None) -> int:
                 include_tool_assertions=not args.no_tools,
                 include_text_assertion=not args.no_text,
                 force=args.force,
+            )
+        if args.command == "compare":
+            return _cmd_compare(
+                args.baseline,
+                args.candidate,
+                as_markdown=args.as_markdown,
+                as_json=args.as_json,
+                min_similarity=args.min_similarity,
+                max_cost_increase_pct=args.max_cost_increase_pct,
+                fail_on_tool_drift=args.fail_on_tool_drift,
             )
     except (TapeError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
