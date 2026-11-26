@@ -11,6 +11,8 @@ from rhinotape.chaos import (
     inject_latency,
     truncate_stream,
 )
+from rhinotape.codegen import generate_pytest_code
+from rhinotape.graph import render_ascii_graph, render_mermaid_graph
 from rhinotape.html_report import render_html_report
 from rhinotape.integrations import (
     GenericHTTPRequest,
@@ -57,9 +59,11 @@ from rhinotape.models import (
 )
 from rhinotape.pricing import (
     DEFAULT_PRICING,
+    DEPRECATED_MODELS,
     ModelPrice,
     estimate_cache_savings_usd,
     estimate_cost_usd,
+    get_deprecation_notice,
     load_pricing_file,
 )
 from rhinotape.scrubbing import (
@@ -93,6 +97,7 @@ __all__ = [
     "CorruptCassetteError",
     "DEFAULT_MATCH_ON",
     "DEFAULT_PRICING",
+    "DEPRECATED_MODELS",
     "FileCassetteStore",
     "GenericHTTPRequest",
     "GenericHTTPResponse",
@@ -140,6 +145,8 @@ __all__ = [
     "estimate_cost_usd",
     "fail_first",
     "fail_nth",
+    "generate_pytest_code",
+    "get_deprecation_notice",
     "handle_generic_request",
     "handle_generic_request_async",
     "inject_latency",
@@ -157,7 +164,9 @@ __all__ = [
     "normalize_json_array_order",
     "redact_body",
     "redact_text",
+    "render_ascii_graph",
     "render_html_report",
+    "render_mermaid_graph",
     "replace_response",
     "require_session",
     "resolve_pii_patterns",

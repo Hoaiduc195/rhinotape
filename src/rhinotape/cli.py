@@ -25,6 +25,8 @@ from urllib.parse import parse_qsl, urlsplit
 
 from rhinotape._version import __version__ as _VERSION
 from rhinotape.cassette import Cassette, cassette_json_schema, iter_cassette_files
+from rhinotape.codegen import generate_pytest_code
+from rhinotape.graph import render_ascii_graph, render_mermaid_graph
 from rhinotape.models import (
     CorruptCassetteError,
     Interaction,
@@ -40,6 +42,7 @@ from rhinotape.pricing import (
     PRICING_FILE_ENV,
     ModelPrice,
     estimate_cache_savings_usd,
+    get_deprecation_notice,
     load_pricing_file,
 )
 from rhinotape.scrubbing import (
@@ -118,6 +121,7 @@ def _cmd_inspect(
     show_bodies: bool = False,
     show_thinking: bool = False,
     interaction_index: int | None = None,
+    graph: str | None = None,
 ) -> int:
     cassette = Cassette.load(path)
     stats = _cassette_stats(cassette)
@@ -133,6 +137,18 @@ def _cmd_inspect(
             )
             return 1
         indexed = [indexed[interaction_index - 1]]
+
+    if graph is not None:
+        target_cassette = (
+            cassette.slice(interaction_index - 1, interaction_index)
+            if interaction_index is not None
+            else cassette
+        )
+        if graph == "mermaid":
+            print(render_mermaid_graph(target_cassette))
+        else:
+            print(render_ascii_graph(target_cassette))
+        return 0
 
     if as_json:
         items: list[dict[str, Any]] = []
@@ -468,20 +484,74 @@ def _scan_cassette_secrets(
     return findings
 
 
+def _parse_age_to_timedelta(raw: str) -> timedelta:
+    """Parse a duration string like '30d', '12h', '2w', or plain numeric days '30'."""
+    text = raw.strip().lower()
+    if not text:
+        raise ValueError("--max-age must be a non-negative duration like '30d', '12h', or '30'.")
+    unit = "d"
+    num_str = text
+    if text[-1] in ("d", "h", "w"):
+        unit = text[-1]
+        num_str = text[:-1].strip()
+    try:
+        value = float(num_str)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid --max-age value {raw!r}; expected e.g. '30d', '12h', '2w', or '30'."
+        ) from exc
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError(f"--max-age must be finite and >= 0, got {raw!r}.")
+    try:
+        if unit == "h":
+            return timedelta(hours=value)
+        if unit == "w":
+            return timedelta(weeks=value)
+        return timedelta(days=value)
+    except OverflowError as exc:
+        raise ValueError(f"--max-age value {raw!r} is out of range.") from exc
+
+
+def _cassette_recorded_datetime(cassette: Cassette, path: Path) -> datetime:
+    if cassette.recorded_at:
+        raw = cassette.recorded_at
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            pass
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+
+
 def _cmd_verify(
     targets: list[Path],
     *,
     check_secrets: bool = False,
     check_pii: bool = False,
     secret_patterns: list[str] | None = None,
+    max_age: str | None = None,
+    warn_deprecated_models: bool = False,
+    fail_on_deprecated_models: bool = False,
     as_json: bool = False,
 ) -> int:
-    """Validate .tape.json(.gz) cassette(s) for schema integrity and optional secret/PII leaks."""
+    """Validate .tape.json(.gz) cassette(s) for schema integrity, secrets, staleness, and models."""
     if not targets:
         targets = [Path(".")]
     for target in targets:
         if not target.exists():
             print(f"Error: path not found: {target}", file=sys.stderr)
+            return 1
+
+    max_age_delta: timedelta | None = None
+    if max_age is not None:
+        try:
+            max_age_delta = _parse_age_to_timedelta(max_age)
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
             return 1
 
     compiled_patterns: list[tuple[str, re.Pattern[str]]] = []
@@ -502,6 +572,10 @@ def _cmd_verify(
     files = sorted(files_set)
     schema_errors: list[dict[str, str]] = []
     secret_findings: list[dict[str, str]] = []
+    stale_findings: list[dict[str, Any]] = []
+    deprecated_findings: list[dict[str, str]] = []
+    now_utc = datetime.now(timezone.utc)
+    check_deprecated = warn_deprecated_models or fail_on_deprecated_models
 
     for file_path in files:
         try:
@@ -524,8 +598,53 @@ def _cmd_verify(
                         f"SECRET {file_path} [{hit['pattern']}] at {hit['location']}",
                         file=sys.stderr,
                     )
+        if max_age_delta is not None:
+            recorded_dt = _cassette_recorded_datetime(cassette, file_path)
+            age = now_utc - recorded_dt
+            if age > max_age_delta:
+                age_days = round(age.total_seconds() / 86400.0, 2)
+                stale_findings.append(
+                    {
+                        "path": str(file_path),
+                        "recorded_at": recorded_dt.isoformat(),
+                        "age_days": age_days,
+                        "max_age": max_age,
+                    }
+                )
+                if not as_json:
+                    print(
+                        f"STALE {file_path}: recorded {age_days:.2f}d ago "
+                        f"(exceeds --max-age {max_age})",
+                        file=sys.stderr,
+                    )
+        if check_deprecated:
+            seen_models: set[str] = set()
+            for inter in cassette.interactions:
+                model = inter.llm.model
+                if not model:
+                    continue
+                model_key = model.lower().strip()
+                if model_key in seen_models:
+                    continue
+                seen_models.add(model_key)
+                notice = get_deprecation_notice(model)
+                if notice is not None:
+                    deprecated_findings.append(
+                        {"path": str(file_path), "model": model, "notice": notice}
+                    )
+                    if not as_json:
+                        level = "FAIL" if fail_on_deprecated_models else "WARN"
+                        print(
+                            f"{level} DEPRECATED {file_path} [{model}]: {notice}",
+                            file=sys.stderr,
+                        )
 
-    ok = not schema_errors and not secret_findings
+    ok = (
+        not schema_errors
+        and not secret_findings
+        and not stale_findings
+        and (not fail_on_deprecated_models or not deprecated_findings)
+    )
     if as_json:
         print(
             json.dumps(
@@ -534,6 +653,8 @@ def _cmd_verify(
                     "checked_files": len(files),
                     "schema_errors": schema_errors,
                     "secret_findings": secret_findings,
+                    "stale_findings": stale_findings,
+                    "deprecated_findings": deprecated_findings,
                 },
                 indent=2,
             )
@@ -541,14 +662,24 @@ def _cmd_verify(
         return 0 if ok else 1
 
     if not ok:
+        parts = [
+            f"{len(schema_errors)} invalid cassette(s)",
+            f"{len(secret_findings)} secret finding(s)",
+        ]
+        if stale_findings:
+            parts.append(f"{len(stale_findings)} stale cassette(s)")
+        if fail_on_deprecated_models and deprecated_findings:
+            parts.append(f"{len(deprecated_findings)} deprecated model(s)")
         print(
-            f"Verification failed: {len(schema_errors)} invalid cassette(s), "
-            f"{len(secret_findings)} secret finding(s) across {len(files)} file(s).",
+            f"Verification failed: {', '.join(parts)} across {len(files)} file(s).",
             file=sys.stderr,
         )
         return 1
     label = str(targets[0]) if len(targets) == 1 else f"{len(targets)} targets"
-    print(f"OK: verified {len(files)} cassette(s) in {label}.")
+    suffix = (
+        f" ({len(deprecated_findings)} deprecated model warning(s))" if deprecated_findings else ""
+    )
+    print(f"OK: verified {len(files)} cassette(s) in {label}{suffix}.")
     return 0
 
 
@@ -2349,6 +2480,52 @@ def _cmd_split(
     return 0
 
 
+def _cmd_gen_test(
+    path: Path,
+    *,
+    output: Path | None = None,
+    test_name: str | None = None,
+    cost_headroom: float = 1.25,
+    token_headroom: float = 1.25,
+    include_tool_assertions: bool = True,
+    include_text_assertion: bool = True,
+    force: bool = False,
+) -> int:
+    """Generate a ready-to-run pytest regression test file from a recorded cassette."""
+    if not path.exists() or not path.is_file():
+        print(f"Error: cassette file not found: {path}", file=sys.stderr)
+        return 1
+    cassette = Cassette.load(path)
+    try:
+        code = generate_pytest_code(
+            cassette,
+            cassette_ref=path.as_posix(),
+            test_name=test_name,
+            cost_headroom=cost_headroom,
+            token_headroom=token_headroom,
+            include_tool_assertions=include_tool_assertions,
+            include_text_assertion=include_text_assertion,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if output is not None:
+        if output.exists() and not force:
+            print(
+                f"Error: destination file already exists: {output} (pass --force to overwrite).",
+                file=sys.stderr,
+            )
+            return 1
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(code, encoding="utf-8")
+        print(f"Generated pytest test from {path} -> {output}.")
+        return 0
+
+    sys.stdout.write(code)
+    return 0
+
+
 def _build_cli_replay_server(
     source: Path,
     *,
@@ -2605,6 +2782,14 @@ def build_parser() -> argparse.ArgumentParser:
         dest="interaction_index",
         help="Inspect only the given 1-based interaction index.",
     )
+    p_inspect.add_argument(
+        "--graph",
+        nargs="?",
+        const="ascii",
+        default=None,
+        choices=["ascii", "mermaid"],
+        help="Render an ASCII (default) or Mermaid call & tool trajectory graph.",
+    )
 
     p_summary = sub.add_parser(
         "summary", help="Summarize all .tape.json cassettes under a directory."
@@ -2663,6 +2848,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         dest="secret_patterns",
         help="Additional regex pattern to treat as a leaked secret (implies --check-secrets).",
+    )
+    p_verify.add_argument(
+        "--max-age",
+        default=None,
+        help="Fail verification if cassette age exceeds this duration (e.g. '30d', '12h', '2w').",
+    )
+    p_verify.add_argument(
+        "--warn-deprecated-models",
+        action="store_true",
+        help="Warn when cassettes reference known deprecated or retired LLM models.",
+    )
+    p_verify.add_argument(
+        "--fail-on-deprecated-models",
+        action="store_true",
+        help="Fail verification when cassettes reference known deprecated or retired LLM models.",
     )
     p_verify.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
 
@@ -3124,6 +3324,51 @@ def build_parser() -> argparse.ArgumentParser:
     p_list.add_argument("--limit", type=int, default=None, help="Maximum number of rows to show.")
     p_list.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
 
+    p_gen_test = sub.add_parser(
+        "gen-test",
+        help="Generate a ready-to-run pytest regression test file from a recorded cassette.",
+    )
+    p_gen_test.add_argument("path", type=Path, help="Source .tape.json(.gz) cassette file.")
+    p_gen_test.add_argument(
+        "-o",
+        "--output",
+        type=Path,
+        default=None,
+        help="Optional destination Python file (defaults to stdout).",
+    )
+    p_gen_test.add_argument(
+        "--test-name",
+        default=None,
+        help="Custom pytest function name (defaults to test_<cassette_stem>).",
+    )
+    p_gen_test.add_argument(
+        "--cost-headroom",
+        type=float,
+        default=1.25,
+        help="Multiplier for assert_cost_under budget (default: 1.25).",
+    )
+    p_gen_test.add_argument(
+        "--token-headroom",
+        type=float,
+        default=1.25,
+        help="Multiplier for assert_tokens_under budget (default: 1.25).",
+    )
+    p_gen_test.add_argument(
+        "--no-tools",
+        action="store_true",
+        help="Omit assert_tool_sequence from the generated test.",
+    )
+    p_gen_test.add_argument(
+        "--no-text",
+        action="store_true",
+        help="Omit assert_text_contains from the generated test.",
+    )
+    p_gen_test.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite --output if it already exists.",
+    )
+
     return parser
 
 
@@ -3145,6 +3390,7 @@ def main(argv: list[str] | None = None) -> int:
                 show_bodies=args.show_bodies,
                 show_thinking=args.show_thinking,
                 interaction_index=args.interaction_index,
+                graph=args.graph,
             )
         if args.command == "summary":
             return _cmd_summary(
@@ -3160,6 +3406,9 @@ def main(argv: list[str] | None = None) -> int:
                 check_secrets=args.check_secrets,
                 check_pii=args.check_pii,
                 secret_patterns=args.secret_patterns,
+                max_age=args.max_age,
+                warn_deprecated_models=args.warn_deprecated_models,
+                fail_on_deprecated_models=args.fail_on_deprecated_models,
                 as_json=args.as_json,
             )
         if args.command == "diff":
@@ -3274,6 +3523,17 @@ def main(argv: list[str] | None = None) -> int:
                 sort_by=args.sort_by,
                 limit=args.limit,
                 as_json=args.as_json,
+            )
+        if args.command == "gen-test":
+            return _cmd_gen_test(
+                args.path,
+                output=args.output,
+                test_name=args.test_name,
+                cost_headroom=args.cost_headroom,
+                token_headroom=args.token_headroom,
+                include_tool_assertions=not args.no_tools,
+                include_text_assertion=not args.no_text,
+                force=args.force,
             )
     except (TapeError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)

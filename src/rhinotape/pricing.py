@@ -241,6 +241,20 @@ def _load_env_pricing_cached(env_file: str) -> dict[str, ModelPrice]:
     return loaded
 
 
+def _normalize_model_key(model: str) -> tuple[str, str]:
+    raw_normalized = model.lower().strip()
+    normalized = raw_normalized
+    if normalized.startswith("models/"):
+        normalized = normalized[len("models/") :]
+    if "/" in normalized:
+        normalized = normalized.rsplit("/", 1)[-1]
+    for prefix in ("anthropic.", "us.anthropic.", "eu.anthropic.", "apac.anthropic."):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+            break
+    return raw_normalized, normalized
+
+
 def _resolve_model_price(
     model: str | None,
     custom_pricing: dict[str, ModelPrice] | None = None,
@@ -259,22 +273,12 @@ def _resolve_model_price(
     else:
         table = DEFAULT_PRICING
 
-    raw_normalized = model.lower().strip()
+    raw_normalized, normalized = _normalize_model_key(model)
     if raw_normalized in table:
         return table[raw_normalized]
     raw_matches = [key for key in table if _matches_model_prefix(raw_normalized, key)]
     if raw_matches:
         return table[max(raw_matches, key=len)]
-
-    normalized = raw_normalized
-    if normalized.startswith("models/"):
-        normalized = normalized[len("models/") :]
-    if "/" in normalized:
-        normalized = normalized.rsplit("/", 1)[-1]
-    for prefix in ("anthropic.", "us.anthropic.", "eu.anthropic.", "apac.anthropic."):
-        if normalized.startswith(prefix):
-            normalized = normalized[len(prefix) :]
-            break
 
     if normalized in table:
         return table[normalized]
@@ -331,3 +335,57 @@ def estimate_cache_savings_usd(
         cache_creation_tokens=cache_creation_tokens,
     )
     return round(uncached - actual, 10)
+
+
+# Known retired or deprecated LLM models mapped to concise migration guidance.
+DEPRECATED_MODELS: dict[str, str] = {
+    # OpenAI legacy / retired snapshots
+    "text-davinci-003": "Retired legacy completions model; migrate to gpt-4.1-mini or gpt-4o-mini.",
+    "gpt-3.5-turbo-0301": "Retired snapshot; migrate to gpt-4.1-mini or gpt-4o-mini.",
+    "gpt-3.5-turbo-0613": "Retired snapshot; migrate to gpt-4.1-mini or gpt-4o-mini.",
+    "gpt-3.5-turbo-16k-0613": "Retired snapshot; migrate to gpt-4.1-mini or gpt-4o-mini.",
+    "gpt-4-0314": "Retired snapshot; migrate to gpt-4.1 or gpt-4o.",
+    "gpt-4-0613": "Legacy snapshot; migrate to gpt-4.1 or gpt-4o.",
+    "gpt-4-32k": "Retired model family; migrate to gpt-4.1 or gpt-4o.",
+    "gpt-4-vision-preview": "Retired preview model; migrate to gpt-4o or gpt-4.1.",
+    "gpt-4-1106-preview": "Legacy preview model; migrate to gpt-4.1 or gpt-4o.",
+    "gpt-4-0125-preview": "Legacy preview model; migrate to gpt-4.1 or gpt-4o.",
+    "gpt-4.5-preview": "Deprecated preview model; migrate to gpt-4.1.",
+    "o1-preview": "Deprecated preview model; migrate to o3 or o4-mini.",
+    "o1-mini": "Deprecated model; migrate to o3-mini or o4-mini.",
+    # Anthropic retired / deprecated models
+    "claude-2.0": "Retired model; migrate to claude-sonnet-4 or claude-3-7-sonnet.",
+    "claude-2.1": "Retired model; migrate to claude-sonnet-4 or claude-3-7-sonnet.",
+    "claude-instant-1.2": "Retired model; migrate to claude-haiku-4 or claude-3-5-haiku.",
+    "claude-3-sonnet": "Retired model; migrate to claude-sonnet-4 or claude-3-7-sonnet.",
+    "claude-3-opus": "Deprecated model; migrate to claude-opus-4.",
+    "claude-3-5-sonnet-20240620": "Deprecated snapshot; migrate to claude-sonnet-4.",
+    # Google Gemini legacy / deprecated models
+    "gemini-1.0-pro": "Retired model; migrate to gemini-2.5-flash or gemini-2.5-pro.",
+    "gemini-pro": "Retired legacy alias; migrate to gemini-2.5-flash or gemini-2.5-pro.",
+    "gemini-1.5-pro": "Deprecated model; migrate to gemini-2.5-pro.",
+    "gemini-1.5-flash": "Deprecated model; migrate to gemini-2.5-flash.",
+}
+
+
+def get_deprecation_notice(
+    model: str | None,
+    *,
+    deprecated_models: dict[str, str] | None = None,
+) -> str | None:
+    """Return a deprecation notice if `model` matches a known deprecated/retired model."""
+    if not model:
+        return None
+    table = (
+        {k.lower().strip(): v for k, v in deprecated_models.items()}
+        if deprecated_models is not None
+        else DEPRECATED_MODELS
+    )
+    raw_norm, norm = _normalize_model_key(model)
+    for candidate in (raw_norm, norm):
+        if candidate in table:
+            return table[candidate]
+        matches = [key for key in table if _matches_model_prefix(candidate, key)]
+        if matches:
+            return table[max(matches, key=len)]
+    return None

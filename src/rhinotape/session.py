@@ -2026,6 +2026,169 @@ class TapeSession:
                 f"({usage.cached_input_tokens}/{usage.input_tokens} cached input tokens)."
             )
 
+    def assert_no_tool_loop(self, max_consecutive: int = 2, *, include_args: bool = True) -> None:
+        """Assert that no tool call repeats consecutively more than `max_consecutive` times."""
+        if isinstance(max_consecutive, bool) or max_consecutive < 1:
+            raise ValueError("max_consecutive must be an integer >= 1")
+
+        prev_key: str | tuple[str, str] | None = None
+        prev_name = ""
+        run_count = 0
+
+        for inter in self.interactions:
+            for tc in inter.llm.tool_calls:
+                key: str | tuple[str, str] = (
+                    (tc.name, json.dumps(tc.arguments, sort_keys=True, default=str))
+                    if include_args
+                    else tc.name
+                )
+                if run_count > 0 and key == prev_key:
+                    run_count += 1
+                else:
+                    if run_count > max_consecutive:
+                        raise TapeAssertionError(
+                            f"Tool loop detected: tool {prev_name!r} was called {run_count} "
+                            f"consecutive times (limit: {max_consecutive})."
+                        )
+                    prev_key = key
+                    prev_name = tc.name
+                    run_count = 1
+
+        if run_count > max_consecutive:
+            raise TapeAssertionError(
+                f"Tool loop detected: tool {prev_name!r} was called {run_count} "
+                f"consecutive times (limit: {max_consecutive})."
+            )
+
+    def assert_tool_recovery(
+        self, *, min_recovery_calls: int = 1, require_error: bool = False
+    ) -> None:
+        """Assert that after any HTTP/tool error turn, the agent recovers with successful calls."""
+        if isinstance(min_recovery_calls, bool) or min_recovery_calls < 1:
+            raise ValueError("min_recovery_calls must be an integer >= 1")
+
+        interactions = self.interactions
+        error_indices = [
+            idx
+            for idx, inter in enumerate(interactions)
+            if inter.response.status_code >= 400 or _request_has_tool_error(inter.request.body)
+        ]
+
+        if not error_indices:
+            if require_error:
+                raise TapeAssertionError(
+                    "Expected at least one HTTP or tool error turn to verify recovery, "
+                    "but none was observed."
+                )
+            return
+
+        last_error_idx = error_indices[-1]
+        last_error_inter = interactions[last_error_idx]
+        # If the final error was a tool error in the request and the LLM itself answered
+        # successfully with final text (no unresolved follow-up tool calls), that turn counts
+        # as a completed recovery call.
+        inline_recovery = (
+            last_error_inter.response.status_code < 400
+            and not last_error_inter.llm.tool_calls
+            and bool(last_error_inter.llm.text.strip())
+        )
+        recovery_slice = (
+            interactions[last_error_idx:] if inline_recovery else interactions[last_error_idx + 1 :]
+        )
+        successful_after = [i for i in recovery_slice if i.response.status_code < 400]
+        if len(successful_after) < min_recovery_calls or (
+            recovery_slice and recovery_slice[-1].response.status_code >= 400
+        ):
+            raise TapeAssertionError(
+                f"Tool recovery failed: last error occurred at call[{last_error_idx}], "
+                f"followed by {len(successful_after)} successful recovery call(s) "
+                f"(required: >= {min_recovery_calls})."
+            )
+
+
+def _has_non_empty_error_key(obj: dict[str, Any]) -> bool:
+    if "error" not in obj:
+        return False
+    err_val = obj["error"]
+    if isinstance(err_val, str):
+        return bool(err_val.strip())
+    return bool(err_val)
+
+
+def _content_is_tool_error(content: Any) -> bool:
+    if isinstance(content, dict):
+        return _has_non_empty_error_key(content)
+    if isinstance(content, str):
+        stripped = content.lstrip()
+        if stripped.startswith("Error:"):
+            return True
+        if stripped.startswith("{"):
+            try:
+                parsed = json.loads(stripped)
+            except ValueError:
+                return False
+            if isinstance(parsed, dict):
+                return _has_non_empty_error_key(parsed)
+        return False
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                if _content_is_tool_error(item.get("text")):
+                    return True
+    return False
+
+
+def _request_has_tool_error(body: Any) -> bool:
+    """Return True if an LLM request body carries a tool error in the latest turn."""
+    if not isinstance(body, dict):
+        return False
+
+    raw_messages = body.get("messages")
+    if isinstance(raw_messages, list):
+        msg_dicts = [m for m in raw_messages if isinstance(m, dict)]
+        last_non_asst = -1
+        for idx, msg in enumerate(msg_dicts):
+            if msg.get("role") != "assistant":
+                last_non_asst = idx
+        if last_non_asst >= 0:
+            start_idx = 0
+            for idx in range(last_non_asst - 1, -1, -1):
+                if msg_dicts[idx].get("role") == "assistant":
+                    start_idx = idx + 1
+                    break
+            for msg in msg_dicts[start_idx : last_non_asst + 1]:
+                role = msg.get("role")
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if (
+                            isinstance(block, dict)
+                            and block.get("type") == "tool_result"
+                            and block.get("is_error") is True
+                        ):
+                            return True
+                if role == "tool" and _content_is_tool_error(content):
+                    return True
+
+    raw_input = body.get("input")
+    if isinstance(raw_input, list):
+        input_dicts = [item for item in raw_input if isinstance(item, dict)]
+        start_idx = 0
+        for idx in range(len(input_dicts) - 1, -1, -1):
+            item_type = input_dicts[idx].get("type")
+            if item_type == "function_call" or (
+                item_type == "message" and input_dicts[idx].get("role") == "assistant"
+            ):
+                start_idx = idx + 1
+                break
+        for item in input_dicts[start_idx:]:
+            if item.get("type") == "function_call_output" and _content_is_tool_error(
+                item.get("output")
+            ):
+                return True
+
+    return False
+
 
 def tape(
     cassette_path: str | Path,
