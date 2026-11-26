@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo.jpg" alt="llm-tape rhinoceros logo" width="160" />
+<img src="https://raw.githubusercontent.com/Hoaiduc195/llm-tape/master/assets/logo.jpg" alt="llm-tape rhinoceros logo" width="160" />
 
 # llm-tape
 
@@ -15,7 +15,7 @@ Zero API spend in CI · Automatic secret & PII scrubbing · True sync & async SS
 [![Code style: Ruff](https://img.shields.io/badge/code%20style-ruff-d7ff64.svg)](https://github.com/astral-sh/ruff)
 [![Dependencies: 1](https://img.shields.io/badge/runtime%20deps-1%20(httpx)-f59e0b.svg)](https://github.com/Hoaiduc195/llm-tape/blob/master/pyproject.toml)
 
-[Quickstart](#-quickstart) · [Why llm-tape?](#-why-llm-tape) · [Framework Integrations](#-framework--polyglot-integrations) · [Providers](#-supported-providers) · [CLI](#-cli-power-tools) · [Contributing](#-contributing)
+[Quickstart](#quickstart) · [Why llm-tape?](#why-llm-tape) · [Framework Integrations](#framework--polyglot-integrations) · [Providers](#supported-providers) · [CLI](#cli-power-tools) · [Contributing](#contributing)
 
 </div>
 
@@ -151,7 +151,7 @@ async def fetch_summary(text: str) -> str:
 
 ## Framework & Polyglot Integrations
 
-`llm-tape` drops cleanly into **any** stack with zero extra dependencies — see the complete copy-paste cookbook in **[docs/integrations.md](docs/integrations.md)** and runnable demos in **[examples/framework_integrations.py](examples/framework_integrations.py)**.
+`llm-tape` drops cleanly into **any** stack with zero extra dependencies — see the complete copy-paste cookbook in **[docs/integrations.md](https://github.com/Hoaiduc195/llm-tape/blob/master/docs/integrations.md)** and runnable demos in **[examples/framework_integrations.py](https://github.com/Hoaiduc195/llm-tape/blob/master/examples/framework_integrations.py)**.
 
 | Stack / Framework | Integration Surface |
 | :--- | :--- |
@@ -256,7 +256,7 @@ repos:
 Contributions are warmly welcome! Whether you want to add a new LLM provider parser, improve CLI/reporting UX, add framework cookbooks, or tackle a bug:
 
 1. Browse open [**good first issues**](https://github.com/Hoaiduc195/llm-tape/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) or [**help wanted**](https://github.com/Hoaiduc195/llm-tape/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22) tasks.
-2. Read **[CONTRIBUTING.md](CONTRIBUTING.md)** for the codebase map, design principles, and PR checklist.
+2. Read **[CONTRIBUTING.md](https://github.com/Hoaiduc195/llm-tape/blob/master/CONTRIBUTING.md)** for the codebase map, design principles, and PR checklist.
 3. Run the full offline check suite locally:
 
 ```bash
@@ -271,6 +271,6 @@ uv run pytest -v -W error
 
 ## Security & License
 
-- **Security Policy:** See [SECURITY.md](SECURITY.md) for responsible disclosure and built-in scrubbing/decompression guarantees.
-- **Changelog:** See [CHANGELOG.md](CHANGELOG.md).
-- **License:** Released under the [MIT License](LICENSE).
+- **Security Policy:** See [SECURITY.md](https://github.com/Hoaiduc195/llm-tape/blob/master/SECURITY.md) for responsible disclosure and built-in scrubbing/decompression guarantees.
+- **Changelog:** See [CHANGELOG.md](https://github.com/Hoaiduc195/llm-tape/blob/master/CHANGELOG.md).
+- **License:** Released under the [MIT License](https://github.com/Hoaiduc195/llm-tape/blob/master/LICENSE).

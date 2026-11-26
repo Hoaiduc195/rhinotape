@@ -2851,8 +2851,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    run_passthrough: list[str] | None = None
+    if raw_argv and raw_argv[0] == "run" and "--" in raw_argv:
+        sep_idx = raw_argv.index("--")
+        run_passthrough = raw_argv[sep_idx + 1 :]
+        raw_argv = raw_argv[:sep_idx]
+
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     try:
         if args.command == "inspect":
             return _cmd_inspect(
@@ -2943,7 +2950,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run":
             return _cmd_run(
                 args.source,
-                args.cmd,
+                run_passthrough if run_passthrough is not None else args.cmd,
                 mode=args.mode,
                 upstream=args.upstream,
                 enable_cors=args.cors,

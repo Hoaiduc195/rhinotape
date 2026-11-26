@@ -215,9 +215,27 @@ def test_cli_run_zero_code_replay_budgets_and_module_entry(
     assert rc_over == 1
     assert "max_cost_usd" in capsys.readouterr().err
 
-    # 3. Failing child propagates exit code; missing command -> 2; invalid budget -> 1
+    # 3. Child exit code, flag passthrough, missing command (-> 2), invalid budget (-> 1)
     assert cli_main(["run", str(cass_path), "--", sys.executable, "-c", "raise SystemExit(7)"]) == 7
+    assert (
+        cli_main(
+            [
+                "run",
+                str(cass_path),
+                "--quiet",
+                "--",
+                sys.executable,
+                "-c",
+                "import sys; assert sys.argv[1:] == ['--mode', 'child', '--help']",
+                "--mode",
+                "child",
+                "--help",
+            ]
+        )
+        == 0
+    )
     assert cli_main(["run", str(cass_path)]) == 2
+    assert cli_main(["run", str(cass_path), "--"]) == 2
     assert cli_main(["run", str(cass_path), "--max-cost", "nan", "--", sys.executable]) == 1
 
     # 4. `python -m llm_tape --version` works cleanly

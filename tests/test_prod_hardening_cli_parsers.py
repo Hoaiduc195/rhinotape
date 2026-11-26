@@ -6,7 +6,6 @@ import base64
 import json
 import logging
 import math
-import os
 import signal
 import threading
 import time
@@ -929,7 +928,7 @@ def test_cli_serve_sigterm_and_matching_flags(
 
         def _send_sigterm() -> None:
             time.sleep(0.15)
-            os.kill(os.getpid(), signal.SIGTERM)
+            signal.raise_signal(signal.SIGTERM)
 
         sender = threading.Thread(target=_send_sigterm, daemon=True)
         sender.start()
