@@ -10,7 +10,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import (
+from rhinotape import (
     Cassette,
     CorruptCassetteError,
     TapeMode,
@@ -18,8 +18,8 @@ from llm_tape import (
     TapeTransport,
     tape,
 )
-from llm_tape.cassette import is_cassette_file, iter_cassette_files
-from llm_tape.cli import main as cli_main
+from rhinotape.cassette import is_cassette_file, iter_cassette_files
+from rhinotape.cli import main as cli_main
 
 pytest_plugins = ["pytester"]
 
@@ -184,9 +184,9 @@ def test_pytester_tape_compress_option(pytester: pytest.Pytester) -> None:
     pytester.makepyfile(
         """
         import httpx
-        from llm_tape import TapeTransport
+        from rhinotape import TapeTransport
 
-        def test_compressed_tape(llm_tape):
+        def test_compressed_tape(rhinotape):
             upstream = httpx.MockTransport(
                 lambda req: httpx.Response(
                     200,
@@ -196,7 +196,7 @@ def test_pytester_tape_compress_option(pytester: pytest.Pytester) -> None:
                     },
                 )
             )
-            with httpx.Client(transport=TapeTransport(llm_tape, upstream=upstream)) as c:
+            with httpx.Client(transport=TapeTransport(rhinotape, upstream=upstream)) as c:
                 r = c.post("https://api.openai.com/v1/chat/completions", json={"a": 1})
                 assert r.status_code == 200
         """
@@ -212,8 +212,8 @@ def test_gzip_bomb_cap_and_case_insensitive_extensions(
 ) -> None:
     import gzip as gzip_mod
 
-    import llm_tape.cassette as cassette_mod
-    from llm_tape.cli import _cassette_stem
+    import rhinotape.cassette as cassette_mod
+    from rhinotape.cli import _cassette_stem
 
     # Bounded gzip decompression rejects oversized payloads
     monkeypatch.setattr(cassette_mod, "MAX_CASSETTE_BYTES", 64)
@@ -234,15 +234,15 @@ def test_gzip_bomb_cap_and_case_insensitive_extensions(
 def test_pricing_file_cache_and_pattern_only_redaction_preserves_input(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import llm_tape.pricing as pricing_mod
-    from llm_tape import estimate_cost_usd, redact_body
+    import rhinotape.pricing as pricing_mod
+    from rhinotape import estimate_cost_usd, redact_body
 
     pfile = tmp_path / "prices.json"
     pfile.write_text(
         json.dumps({"cached-model": {"input_per_million": 2.0, "output_per_million": 4.0}}),
         encoding="utf-8",
     )
-    monkeypatch.setenv("LLM_TAPE_PRICING_FILE", str(pfile))
+    monkeypatch.setenv("RHINOTAPE_PRICING_FILE", str(pfile))
     calls = {"n": 0}
     orig_loader = pricing_mod.load_pricing_file
 

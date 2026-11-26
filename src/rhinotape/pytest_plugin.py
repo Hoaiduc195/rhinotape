@@ -1,4 +1,4 @@
-"""Pytest plugin for llm-tape (auto-discovered via pytest11 entry point)."""
+"""Pytest plugin for rhinotape (auto-discovered via pytest11 entry point)."""
 
 from __future__ import annotations
 
@@ -15,14 +15,14 @@ from typing import Any
 
 import pytest
 
-from llm_tape.models import TapeMode
-from llm_tape.pricing import estimate_cache_savings_usd
-from llm_tape.scrubbing import DEFAULT_MATCH_ON
-from llm_tape.session import TapeSession
+from rhinotape.models import TapeMode
+from rhinotape.pricing import estimate_cache_savings_usd
+from rhinotape.scrubbing import DEFAULT_MATCH_ON
+from rhinotape.session import TapeSession
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _MAX_STEM_LEN = 120
-_FAILED_ATTR = "_llm_tape_call_failed"
+_FAILED_ATTR = "_rhinotape_call_failed"
 _REPORT_KEY: pytest.StashKey[list[dict[str, Any]]] = pytest.StashKey()
 _VIOLATIONS_KEY: pytest.StashKey[list[str]] = pytest.StashKey()
 _VALID_TAPE_MARKER_KWARGS: frozenset[str] = frozenset(
@@ -87,7 +87,7 @@ def _sanitize_segment(name: str, *, unique_seed: str | None = None) -> str:
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    group = parser.getgroup("llm-tape", "Record and replay LLM HTTP interactions")
+    group = parser.getgroup("rhinotape", "Record and replay LLM HTTP interactions")
     group.addoption(
         "--tape-mode",
         action="store",
@@ -155,7 +155,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
     parser.addini(
         "tape_mode",
-        help="Default llm-tape mode (once, replay, record, new_episodes, none).",
+        help="Default rhinotape mode (once, replay, record, new_episodes, none).",
         default=TapeMode.ONCE.value,
     )
     parser.addini(
@@ -226,7 +226,7 @@ def _resolve_max_cost(config: pytest.Config) -> float | None:
     else:
         getini = getattr(config, "getini", None)
         ini_val = str(getini("tape_max_cost") or "") if callable(getini) else ""
-        raw = os.environ.get("LLM_TAPE_MAX_COST", "").strip() or ini_val.strip()
+        raw = os.environ.get("RHINOTAPE_MAX_COST", "").strip() or ini_val.strip()
         if not raw:
             return None
         try:
@@ -245,7 +245,7 @@ def _resolve_max_tokens(config: pytest.Config) -> int | None:
     else:
         getini = getattr(config, "getini", None)
         ini_val = str(getini("tape_max_tokens") or "") if callable(getini) else ""
-        raw = os.environ.get("LLM_TAPE_MAX_TOKENS", "").strip() or ini_val.strip()
+        raw = os.environ.get("RHINOTAPE_MAX_TOKENS", "").strip() or ini_val.strip()
         if not raw:
             return None
         try:
@@ -279,7 +279,7 @@ def pytest_configure(config: pytest.Config) -> None:
         "max_interactions=None, max_cost_usd=None, replay_latency_scale=0.0, "
         "allow_playback_repeats=False, save_on_error=False, patch_httpx=True, "
         "patch_requests=True, patch_aiohttp=True, patch_urllib=False): "
-        "configure cassette options for the llm_tape fixture.",
+        "configure cassette options for the rhinotape fixture.",
     )
 
 
@@ -342,12 +342,12 @@ def _write_json_report_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 @pytest.hookimpl(optionalhook=True)
 def pytest_testnodedown(node: Any, error: Any) -> None:
-    """Aggregate llm-tape report entries from pytest-xdist workers on the controller."""
+    """Aggregate rhinotape report entries from pytest-xdist workers on the controller."""
     del error
     workeroutput = getattr(node, "workeroutput", None)
     if not isinstance(workeroutput, dict):
         return
-    worker_entries = workeroutput.get("llm_tape_entries")
+    worker_entries = workeroutput.get("rhinotape_entries")
     if isinstance(worker_entries, list):
         config = getattr(node, "config", None)
         if config is not None:
@@ -363,7 +363,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         # Running inside a pytest-xdist worker: forward entries to controller
         workeroutput = getattr(session.config, "workeroutput", None)
         if isinstance(workeroutput, dict):
-            workeroutput["llm_tape_entries"] = entries
+            workeroutput["rhinotape_entries"] = entries
         return
 
     totals = _compute_report_totals(entries)
@@ -404,8 +404,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
     html_report_path = session.config.getoption("--tape-html-report", default=None)
     if html_report_path:
-        from llm_tape.cassette import Cassette
-        from llm_tape.html_report import render_html_report
+        from rhinotape.cassette import Cassette
+        from rhinotape.html_report import render_html_report
 
         cassettes: list[Cassette] = []
         seen_paths: set[str] = set()
@@ -420,7 +420,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
                     cassettes.append(Cassette.load(cpath))
                 except Exception:
                     continue
-        html_text = render_html_report(cassettes, title="pytest llm-tape Report")
+        html_text = render_html_report(cassettes, title="pytest rhinotape Report")
         _write_bytes_atomic(Path(str(html_report_path)), html_text.encode("utf-8"))
 
 
@@ -438,7 +438,7 @@ def pytest_terminal_summary(
         return
 
     totals = _compute_report_totals(entries)
-    terminalreporter.write_sep("=", "llm-tape summary")
+    terminalreporter.write_sep("=", "rhinotape summary")
     if show_report:
         if entries:
             terminalreporter.write_line(
@@ -466,7 +466,7 @@ def pytest_terminal_summary(
                     f"Estimated cache savings: ${totals['cache_savings_usd']:.6f}"
                 )
         else:
-            terminalreporter.write_line("No llm_tape sessions executed.")
+            terminalreporter.write_line("No rhinotape sessions executed.")
 
     for msg in violations:
         terminalreporter.write_line(f"FAILED: {msg}", red=True, bold=True)
@@ -484,7 +484,7 @@ def pytest_runtest_makereport(
 
 def _resolve_cassette_dir(request: pytest.FixtureRequest) -> Path:
     cli_dir = request.config.getoption("--tape-dir")
-    env_dir = os.environ.get("LLM_TAPE_DIR", "").strip() or None
+    env_dir = os.environ.get("RHINOTAPE_DIR", "").strip() or None
     ini_dir = str(request.config.getini("tape_dir") or "")
     effective_dir = cli_dir or env_dir or ini_dir or None
     test_path = Path(str(request.path))
@@ -519,7 +519,7 @@ def _is_cassette_stale(path: Path, max_age_days: float) -> bool:
     cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
     recorded_dt: datetime | None = None
     try:
-        from llm_tape.cassette import Cassette
+        from rhinotape.cassette import Cassette
 
         cass = Cassette.load(path)
         if cass.recorded_at:
@@ -537,13 +537,13 @@ def _is_cassette_stale(path: Path, max_age_days: float) -> bool:
 
 
 @pytest.fixture
-def llm_tape_dir(request: pytest.FixtureRequest) -> Path:
+def rhinotape_dir(request: pytest.FixtureRequest) -> Path:
     """Return the resolved cassette directory Path for the current test module."""
     return _resolve_cassette_dir(request)
 
 
 @pytest.fixture
-def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, None]:
+def rhinotape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, None]:
     """Provide an active TapeSession scoped to the current pytest test."""
     cli_mode = request.config.getoption("--tape-mode")
     cli_compress = bool(request.config.getoption("--tape-compress"))
@@ -561,7 +561,7 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
     marker_name = marker_kwargs.get("name")
     marker_mode = marker_kwargs.get("mode")
 
-    env_mode = os.environ.get("LLM_TAPE_MODE", "").strip() or None
+    env_mode = os.environ.get("RHINOTAPE_MODE", "").strip() or None
     mode = TapeMode.coerce(marker_mode or cli_mode or env_mode or ini_mode)
 
     cassette_dir = _resolve_cassette_dir(request)
@@ -606,7 +606,7 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
     if "redact_pii" in marker_kwargs:
         redact_pii: Any = marker_kwargs["redact_pii"]
     else:
-        raw_pii = os.environ.get("LLM_TAPE_REDACT_PII", "").strip() or str(
+        raw_pii = os.environ.get("RHINOTAPE_REDACT_PII", "").strip() or str(
             request.config.getini("tape_redact_pii") or ""
         )
         redact_pii = _parse_redact_pii_setting(raw_pii)

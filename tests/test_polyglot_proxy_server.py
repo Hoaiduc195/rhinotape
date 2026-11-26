@@ -11,9 +11,9 @@ import httpx
 import pytest
 import requests
 
-from llm_tape import Cassette, ModelPrice, TapeMode, TapeReplayServer
-from llm_tape.cli import build_parser
-from llm_tape.cli import main as cli_main
+from rhinotape import Cassette, ModelPrice, TapeMode, TapeReplayServer
+from rhinotape.cli import build_parser
+from rhinotape.cli import main as cli_main
 
 
 def _openai_chat_payload(

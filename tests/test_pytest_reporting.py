@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 import pytest
 
-from llm_tape import TapeAssertionError, TapeMode, TapeTransport, tape
+from rhinotape import TapeAssertionError, TapeMode, TapeTransport, tape
 
 pytest_plugins = ["pytester"]
 
@@ -70,9 +70,9 @@ def test_pytester_report_json_and_budget_gates(pytester: pytest.Pytester) -> Non
     pytester.makepyfile(
         """
         import httpx
-        from llm_tape import TapeTransport
+        from rhinotape import TapeTransport
 
-        def test_llm_cost_reporting(llm_tape):
+        def test_llm_cost_reporting(rhinotape):
             upstream = httpx.MockTransport(
                 lambda req: httpx.Response(
                     200,
@@ -88,7 +88,7 @@ def test_pytester_report_json_and_budget_gates(pytester: pytest.Pytester) -> Non
                     },
                 )
             )
-            with httpx.Client(transport=TapeTransport(llm_tape, upstream=upstream)) as c:
+            with httpx.Client(transport=TapeTransport(rhinotape, upstream=upstream)) as c:
                 r = c.post("https://api.openai.com/v1/chat/completions", json={"q": "hi"})
                 assert r.status_code == 200
         """
@@ -98,7 +98,7 @@ def test_pytester_report_json_and_budget_gates(pytester: pytest.Pytester) -> Non
     res = pytester.runpytest("--tape-report", f"--tape-json-report={json_report}")
     res.assert_outcomes(passed=1)
     stdout = res.stdout.str()
-    assert "llm-tape summary" in stdout
+    assert "rhinotape summary" in stdout
     assert "recorded" in stdout
     assert "1200" in stdout
     assert "400" in stdout
@@ -127,7 +127,7 @@ def test_pytester_report_json_and_budget_gates(pytester: pytest.Pytester) -> Non
 def test_xdist_worker_and_controller_aggregation(tmp_path: Path) -> None:
     from types import SimpleNamespace
 
-    from llm_tape.pytest_plugin import (
+    from rhinotape.pytest_plugin import (
         _REPORT_KEY,
         _VIOLATIONS_KEY,
         pytest_sessionfinish,
@@ -175,7 +175,7 @@ def test_xdist_worker_and_controller_aggregation(tmp_path: Path) -> None:
     # Worker must NOT write the JSON report or fail locally
     assert not json_report.exists()
     assert w1_session.exitstatus == pytest.ExitCode.OK
-    assert len(w1_cfg.workeroutput["llm_tape_entries"]) == 1
+    assert len(w1_cfg.workeroutput["rhinotape_entries"]) == 1
 
     w2_cfg = _make_config(is_worker=True, max_tokens=500)
     w2_cfg.stash[_REPORT_KEY].append(

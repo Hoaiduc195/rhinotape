@@ -37,15 +37,15 @@ def test_pytester_cli_options_and_parametrized_cassettes(
 
         @pytest.mark.parametrize("city", ["Hanoi/VN", "Hanoi:VN"])
         @pytest.mark.tape(name="weather")
-        def test_weather(llm_tape, city):
+        def test_weather(rhinotape, city):
             with httpx.Client(transport=httpx.MockTransport(_mock_handler)) as client:
                 resp = client.post(
                     "https://api.openai.com/v1/chat/completions",
                     json={"city": city},
                 )
                 assert city in resp.json()["choices"][0]["message"]["content"]
-            llm_tape.assert_call_count(1)
-            llm_tape.assert_tokens_under(50)
+            rhinotape.assert_call_count(1)
+            rhinotape.assert_tokens_under(50)
         """
     )
 
@@ -80,16 +80,16 @@ def test_pytester_save_on_error_false_and_class_name_isolation(
             return httpx.Response(200, json={"choices": [], "usage": {"prompt_tokens": 5}})
 
         class TestOpenAI:
-            def test_chat(self, llm_tape):
+            def test_chat(self, rhinotape):
                 with httpx.Client(transport=httpx.MockTransport(_handler)) as client:
                     client.post("https://api.openai.com/v1/chat/completions", json={"p": "openai"})
 
         class TestAnthropic:
-            def test_chat(self, llm_tape):
+            def test_chat(self, rhinotape):
                 with httpx.Client(transport=httpx.MockTransport(_handler)) as client:
                     client.post("https://api.anthropic.com/v1/messages", json={"p": "anthropic"})
 
-        def test_failing_does_not_save_cassette(llm_tape):
+        def test_failing_does_not_save_cassette(rhinotape):
             with httpx.Client(transport=httpx.MockTransport(_handler)) as client:
                 client.post("https://api.openai.com/v1/chat/completions", json={"p": "fail"})
             assert False, "intentional failure"

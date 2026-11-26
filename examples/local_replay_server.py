@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 
-from llm_tape import TapeMode, TapeReplayServer, tape
+from rhinotape import TapeMode, TapeReplayServer, tape
 
 
 def main() -> None:

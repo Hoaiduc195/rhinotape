@@ -17,7 +17,7 @@ import httpx
 import pytest
 from aiohttp import web
 
-from llm_tape import (
+from rhinotape import (
     Cassette,
     Interaction,
     LLMCallSummary,
@@ -35,14 +35,14 @@ from llm_tape import (
     render_html_report,
     tape,
 )
-from llm_tape.aiohttp_adapter import (
+from rhinotape.aiohttp_adapter import (
     _merge_headers,
     _RecordingAiohttpStreamReader,
     _ReplayAiohttpResponse,
     _ReplayAiohttpStreamReader,
 )
-from llm_tape.pricing import PRICING_FILE_ENV, estimate_cost_usd
-from llm_tape.pytest_plugin import (
+from rhinotape.pricing import PRICING_FILE_ENV, estimate_cost_usd
+from rhinotape.pytest_plugin import (
     _REPORT_KEY,
     _VIOLATIONS_KEY,
     _is_cassette_stale,
@@ -50,8 +50,8 @@ from llm_tape.pytest_plugin import (
     pytest_sessionfinish,
     pytest_terminal_summary,
 )
-from llm_tape.server import _extract_path_and_query
-from llm_tape.session import _ReplayRawBytesStream, _StreamContentDecoder
+from rhinotape.server import _extract_path_and_query
+from rhinotape.session import _ReplayRawBytesStream, _StreamContentDecoder
 
 pytest_plugins = ["pytester"]
 
@@ -122,7 +122,7 @@ def _send_raw_http(host: str, port: int, raw: bytes) -> bytes:
         return b"".join(chunks)
 
 
-# --- 1. src/llm_tape/server.py ---------------------------------------------
+# --- 1. src/rhinotape/server.py ---------------------------------------------
 
 
 def test_server_init_validation_modes_and_safe_paths(tmp_path: Path) -> None:
@@ -520,7 +520,7 @@ def test_server_proxy_errors_cors_head_and_control_plane_branches(tmp_path: Path
         assert any("non-finite" in f for f in payload_nf["failures"])
 
 
-# --- 2. src/llm_tape/session.py --------------------------------------------
+# --- 2. src/rhinotape/session.py --------------------------------------------
 
 
 def test_stream_content_decoder_all_encodings_fallbacks_and_bomb_cap(
@@ -736,7 +736,7 @@ async def test_session_assertion_validation_nonfinite_and_early_stream_close(
             assert (await ac.get("https://api.example.com/ping")).text == "pass"
 
 
-# --- 3. src/llm_tape/html_report.py ----------------------------------------
+# --- 3. src/rhinotape/html_report.py ----------------------------------------
 
 
 def test_html_report_truncation_invalid_max_chars_nonfinite_latency_and_badges(
@@ -777,7 +777,7 @@ def test_html_report_truncation_invalid_max_chars_nonfinite_latency_and_badges(
     assert "n/a" in html_out
 
 
-# --- 4. src/llm_tape/aiohttp_adapter.py ------------------------------------
+# --- 4. src/rhinotape/aiohttp_adapter.py ------------------------------------
 
 
 @pytest.mark.asyncio
@@ -974,7 +974,7 @@ async def test_aiohttp_replay_and_recording_stream_readers_and_release_abort(
         await runner.cleanup()
 
 
-# --- 5. src/llm_tape/pytest_plugin.py & pricing.py -------------------------
+# --- 5. src/rhinotape/pytest_plugin.py & pricing.py -------------------------
 
 
 def test_pytest_plugin_ini_errors_summary_and_helpers(
@@ -1005,7 +1005,7 @@ def test_pytest_plugin_ini_errors_summary_and_helpers(
         getoption=lambda name, default=None: True if name == "--tape-report" else default,
     )
     pytest_terminal_summary(tr, 0, cfg)  # type: ignore[arg-type]
-    assert any("No llm_tape sessions executed." in ln for ln in lines)
+    assert any("No rhinotape sessions executed." in ln for ln in lines)
 
     lines.clear()
     stash[_REPORT_KEY] = [

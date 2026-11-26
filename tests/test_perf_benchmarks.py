@@ -6,11 +6,11 @@ import time
 
 import httpx
 
-from llm_tape import MemoryCassetteStore, RecordedRequest, TapeMode, ToolCall, tape
-from llm_tape.parsers import _detect_provider
-from llm_tape.requests_adapter import _ReplayRequestsRaw
-from llm_tape.scrubbing import REDACTED, compile_sensitive_headers, scrub_headers
-from llm_tape.session import _ReplayByteStream
+from rhinotape import MemoryCassetteStore, RecordedRequest, TapeMode, ToolCall, tape
+from rhinotape.parsers import _detect_provider
+from rhinotape.requests_adapter import _ReplayRequestsRaw
+from rhinotape.scrubbing import REDACTED, compile_sensitive_headers, scrub_headers
+from rhinotape.session import _ReplayByteStream
 
 
 def test_direct_to_dict_and_compiled_headers() -> None:

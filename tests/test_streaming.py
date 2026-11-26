@@ -8,8 +8,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import Cassette, tape
-from llm_tape.parsers import parse_llm_interaction
+from rhinotape import Cassette, tape
+from rhinotape.parsers import parse_llm_interaction
 
 
 class _FakeSyncSSEStream(httpx.SyncByteStream):
@@ -284,7 +284,7 @@ def test_stream_429_json_error_recorded_as_json_and_readable(tmp_path: Path) -> 
 def test_tape_transport_works_with_client_stream_and_no_double_interception(
     tmp_path: Path,
 ) -> None:
-    from llm_tape import TapeTransport
+    from rhinotape import TapeTransport
 
     cassette_path = tmp_path / "transport_stream.tape.json"
 
@@ -450,7 +450,7 @@ def test_reused_httpx_request_object_not_bypassed_and_prepare_failure_resets_act
     tmp_path: Path,
 ) -> None:
     """P2 regressions: reused httpx.Request never bypasses replay; failed _prepare resets active."""
-    from llm_tape import TapeNotFoundError, TapeSession
+    from rhinotape import TapeNotFoundError, TapeSession
 
     cassette_path = tmp_path / "reuse.tape.json"
     hits = 0

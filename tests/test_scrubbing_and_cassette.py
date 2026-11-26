@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from llm_tape import Cassette, Interaction, TapeNotFoundError
-from llm_tape.models import LLMCallSummary, RecordedRequest, RecordedResponse, Usage
-from llm_tape.scrubbing import REDACTED, fingerprint_request, scrub_headers, scrub_url
+from rhinotape import Cassette, Interaction, TapeNotFoundError
+from rhinotape.models import LLMCallSummary, RecordedRequest, RecordedResponse, Usage
+from rhinotape.scrubbing import REDACTED, fingerprint_request, scrub_headers, scrub_url
 
 
 def test_scrub_headers_redacts_secrets() -> None:

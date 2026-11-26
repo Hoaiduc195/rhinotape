@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 
-from llm_tape import (
+from rhinotape import (
     MATCH_PATH_AND_BODY,
     MATCH_RELAXED,
     MATCH_STRICT,

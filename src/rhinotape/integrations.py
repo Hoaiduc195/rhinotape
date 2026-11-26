@@ -16,12 +16,12 @@ from typing import Any, ParamSpec, TypeVar
 
 import httpx
 
-from llm_tape.models import TapeError, TapeMode
-from llm_tape.pricing import ModelPrice
-from llm_tape.scrubbing import DEFAULT_MATCH_ON, resolve_pii_patterns, validate_match_on
-from llm_tape.session import TapeSession, _active_session
-from llm_tape.stores import CassetteStore
-from llm_tape.transport import AsyncTapeTransport, TapeTransport
+from rhinotape.models import TapeError, TapeMode
+from rhinotape.pricing import ModelPrice
+from rhinotape.scrubbing import DEFAULT_MATCH_ON, resolve_pii_patterns, validate_match_on
+from rhinotape.session import TapeSession, _active_session
+from rhinotape.stores import CassetteStore
+from rhinotape.transport import AsyncTapeTransport, TapeTransport
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -44,7 +44,7 @@ def require_session() -> TapeSession:
     """Return the active TapeSession in the current context or raise TapeError."""
     session = current_session()
     if session is None:
-        raise TapeError("No active llm-tape session in current context.")
+        raise TapeError("No active rhinotape session in current context.")
     return session
 
 
@@ -157,7 +157,7 @@ def _reset_context_session(token: contextvars.Token[TapeSession | None] | None) 
 
 @dataclass(frozen=True)
 class TapeConfig:
-    """Reusable, immutable configuration for creating llm-tape sessions across frameworks."""
+    """Reusable, immutable configuration for creating rhinotape sessions across frameworks."""
 
     mode: TapeMode | str = TapeMode.ONCE
     tape_dir: Path = Path("tapes")
@@ -207,7 +207,7 @@ class TapeConfig:
             raise ValueError("replay_latency_scale must be a finite number >= 0.0.")
 
     @classmethod
-    def from_env(cls, prefix: str = "LLM_TAPE_") -> TapeConfig:
+    def from_env(cls, prefix: str = "RHINOTAPE_") -> TapeConfig:
         """Build a TapeConfig from environment variables prefixed with `prefix`."""
         raw_mode = os.environ.get(f"{prefix}MODE", "").strip()
         mode: TapeMode = TapeMode.coerce(raw_mode) if raw_mode else TapeMode.ONCE
@@ -382,7 +382,7 @@ class TapeConfig:
 def tape_from_env(
     cassette_path: str | Path | None = None,
     *,
-    prefix: str = "LLM_TAPE_",
+    prefix: str = "RHINOTAPE_",
     **overrides: Any,
 ) -> TapeSession:
     """Create a TapeSession configured from environment variables."""
@@ -501,9 +501,9 @@ class TapeASGIMiddleware:
             try:
                 state = scope.get("state")
                 if state is None:
-                    scope["state"] = {"llm_tape": session}
+                    scope["state"] = {"rhinotape": session}
                 elif isinstance(state, dict):
-                    state["llm_tape"] = session
+                    state["rhinotape"] = session
 
                 if not self.expose_headers:
                     await self.app(scope, receive, send)
@@ -632,7 +632,7 @@ class TapeWSGIMiddleware:
         session = self.config.session(target)
         session.__enter__()
         ctx_token = _ensure_context_session(session)
-        environ["llm_tape.session"] = session
+        environ["rhinotape.session"] = session
 
         def _finalize(exc_occurred: bool) -> None:
             try:
@@ -707,9 +707,9 @@ class TapeTestCaseMixin:
     tape_mode: TapeMode | str | None = None
     tape_strict_unused: bool = False
     tape_kwargs: dict[str, Any] = {}
-    llm_tape: TapeSession
-    _llm_tape_session: TapeSession | None = None
-    _llm_tape_ctx_token: contextvars.Token[TapeSession | None] | None = None
+    rhinotape: TapeSession
+    _rhinotape_session: TapeSession | None = None
+    _rhinotape_ctx_token: contextvars.Token[TapeSession | None] | None = None
 
     def setUp(self) -> None:
         base_cfg = self.tape_config if self.tape_config is not None else TapeConfig()
@@ -729,17 +729,17 @@ class TapeTestCaseMixin:
         session = base_cfg.session(target, **overrides)
         session.__enter__()
         ctx_token = _ensure_context_session(session)
-        self.llm_tape = session
-        self._llm_tape_session = session
-        self._llm_tape_ctx_token = ctx_token
+        self.rhinotape = session
+        self._rhinotape_session = session
+        self._rhinotape_ctx_token = ctx_token
 
         try:
             super_setup = getattr(super(), "setUp", None)
             if callable(super_setup):
                 super_setup()
         except BaseException:
-            self._llm_tape_session = None
-            self._llm_tape_ctx_token = None
+            self._rhinotape_session = None
+            self._rhinotape_ctx_token = None
             try:
                 session._finalize(exc_occurred=True)
             finally:
@@ -747,10 +747,10 @@ class TapeTestCaseMixin:
             raise
 
     def tearDown(self) -> None:
-        session = self._llm_tape_session
-        ctx_token = self._llm_tape_ctx_token
-        self._llm_tape_session = None
-        self._llm_tape_ctx_token = None
+        session = self._rhinotape_session
+        ctx_token = self._rhinotape_ctx_token
+        self._rhinotape_session = None
+        self._rhinotape_ctx_token = None
         unused_err: Exception | None = None
 
         try:
@@ -838,10 +838,10 @@ def activate_tape(
 
 def activate_from_env(
     *,
-    prefix: str = "LLM_TAPE_",
+    prefix: str = "RHINOTAPE_",
     **overrides: Any,
 ) -> GlobalTapeHandle | None:
-    """Activate llm-tape from env vars only when enabled or cassette is configured.
+    """Activate rhinotape from env vars only when enabled or cassette is configured.
 
     Returns None when neither `{prefix}ENABLED` is truthy nor `{prefix}CASSETTE` is set,
     making it safe to call unconditionally at application startup.

@@ -1,4 +1,4 @@
-"""Tests for cache-write pricing, cache savings analytics, and llm-tape pricing CLI."""
+"""Tests for cache-write pricing, cache savings analytics, and rhinotape pricing CLI."""
 
 from __future__ import annotations
 
@@ -8,9 +8,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import TapeMode, estimate_cache_savings_usd, estimate_cost_usd, tape
-from llm_tape.cli import main as cli_main
-from llm_tape.parsers import parse_llm_interaction
+from rhinotape import TapeMode, estimate_cache_savings_usd, estimate_cost_usd, tape
+from rhinotape.cli import main as cli_main
+from rhinotape.parsers import parse_llm_interaction
 
 
 def test_anthropic_cache_write_and_read_pricing() -> None:

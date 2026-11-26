@@ -9,9 +9,9 @@ from collections.abc import Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
-from llm_tape.models import LLMCallSummary, ToolCall, Usage
-from llm_tape.pricing import ModelPrice, estimate_cost_usd
-from llm_tape.scrubbing import redact_text
+from rhinotape.models import LLMCallSummary, ToolCall, Usage
+from rhinotape.pricing import ModelPrice, estimate_cost_usd
+from rhinotape.scrubbing import redact_text
 
 _GEMINI_MODEL_RE = re.compile(r"/models/([^/:?]+)")
 _AZURE_DEPLOYMENT_RE = re.compile(r"/openai/deployments/([^/?]+)")

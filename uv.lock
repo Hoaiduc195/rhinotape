@@ -1083,49 +1083,6 @@ wheels = [
 ]
 
 [[package]]
-name = "llm-tape"
-source = { editable = "." }
-dependencies = [
-    { name = "httpx" },
-]
-
-[package.optional-dependencies]
-aiohttp = [
-    { name = "aiohttp" },
-]
-dev = [
-    { name = "aiohttp" },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "requests" },
-    { name = "ruff" },
-]
-pytest = [
-    { name = "pytest" },
-]
-requests = [
-    { name = "requests" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiohttp", marker = "extra == 'aiohttp'", specifier = ">=3.9.0" },
-    { name = "aiohttp", marker = "extra == 'dev'", specifier = ">=3.9.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
-    { name = "pytest", marker = "extra == 'pytest'", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },
-    { name = "requests", marker = "extra == 'dev'", specifier = ">=2.31.0" },
-    { name = "requests", marker = "extra == 'requests'", specifier = ">=2.31.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0" },
-]
-provides-extras = ["aiohttp", "dev", "pytest", "requests"]
-
-[[package]]
 name = "multidict"
 version = "7.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1789,6 +1746,49 @@ sdist = { url = "https://files.pythonhosted.org/packages/ac/c3/e2a2b89f2d3e2179a
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl", hash = "sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0", size = 73075, upload-time = "2026-05-14T19:25:26.443Z" },
 ]
+
+[[package]]
+name = "rhinotape"
+source = { editable = "." }
+dependencies = [
+    { name = "httpx" },
+]
+
+[package.optional-dependencies]
+aiohttp = [
+    { name = "aiohttp" },
+]
+dev = [
+    { name = "aiohttp" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "requests" },
+    { name = "ruff" },
+]
+pytest = [
+    { name = "pytest" },
+]
+requests = [
+    { name = "requests" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", marker = "extra == 'aiohttp'", specifier = ">=3.9.0" },
+    { name = "aiohttp", marker = "extra == 'dev'", specifier = ">=3.9.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
+    { name = "pytest", marker = "extra == 'pytest'", specifier = ">=8.0.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0.0" },
+    { name = "requests", marker = "extra == 'dev'", specifier = ">=2.31.0" },
+    { name = "requests", marker = "extra == 'requests'", specifier = ">=2.31.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6.0" },
+]
+provides-extras = ["aiohttp", "dev", "pytest", "requests"]
 
 [[package]]
 name = "ruff"

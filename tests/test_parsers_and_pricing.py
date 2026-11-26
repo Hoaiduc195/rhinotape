@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from llm_tape.parsers import parse_llm_interaction
-from llm_tape.pricing import ModelPrice, estimate_cost_usd
+from rhinotape.parsers import parse_llm_interaction
+from rhinotape.pricing import ModelPrice, estimate_cost_usd
 
 
 def test_parse_openai_chat_completions_with_tools() -> None:

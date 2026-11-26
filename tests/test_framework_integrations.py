@@ -1,4 +1,4 @@
-"""Comprehensive tests for zero-dependency framework integrations (src/llm_tape/integrations.py)."""
+"""Tests for zero-dependency framework integrations (src/rhinotape/integrations.py)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from llm_tape import (
+from rhinotape import (
     Cassette,
     MemoryCassetteStore,
     ModelPrice,
@@ -20,7 +20,7 @@ from llm_tape import (
     TapeMode,
     TapeSession,
 )
-from llm_tape.integrations import (
+from rhinotape.integrations import (
     GenericHTTPRequest,
     GenericHTTPResponse,
     TapeASGIMiddleware,
@@ -61,7 +61,7 @@ def _mock_openai_response(
 
 def test_current_and_require_session(tmp_path: Path) -> None:
     assert current_session() is None
-    with pytest.raises(TapeError, match="No active llm-tape session"):
+    with pytest.raises(TapeError, match="No active rhinotape session"):
         require_session()
 
     cpath = tmp_path / "ctx.tape.json"
@@ -78,18 +78,18 @@ def test_current_and_require_session(tmp_path: Path) -> None:
 def test_tape_config_from_env_validation_resolve_session_and_decorator(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LLM_TAPE_MODE", "new_episodes")
-    monkeypatch.setenv("LLM_TAPE_DIR", str(tmp_path / "env_tapes"))
-    monkeypatch.setenv("LLM_TAPE_COMPRESS", "true")
-    monkeypatch.setenv("LLM_TAPE_IGNORE_LOCALHOST", "yes")
-    monkeypatch.setenv("LLM_TAPE_IGNORE_HOSTS", "internal.local, *.metrics.local")
-    monkeypatch.setenv("LLM_TAPE_IGNORE_FIELDS", "request_id, meta.ts")
-    monkeypatch.setenv("LLM_TAPE_IGNORE_QUERY_PARAMS", "nonce, sig")
-    monkeypatch.setenv("LLM_TAPE_REDACT_PII", "email, ssn")
-    monkeypatch.setenv("LLM_TAPE_MAX_COST", "0.5")
-    monkeypatch.setenv("LLM_TAPE_MAX_INTERACTIONS", "4")
-    monkeypatch.setenv("LLM_TAPE_ALLOW_PLAYBACK_REPEATS", "1")
-    monkeypatch.setenv("LLM_TAPE_PATCH_URLLIB", "on")
+    monkeypatch.setenv("RHINOTAPE_MODE", "new_episodes")
+    monkeypatch.setenv("RHINOTAPE_DIR", str(tmp_path / "env_tapes"))
+    monkeypatch.setenv("RHINOTAPE_COMPRESS", "true")
+    monkeypatch.setenv("RHINOTAPE_IGNORE_LOCALHOST", "yes")
+    monkeypatch.setenv("RHINOTAPE_IGNORE_HOSTS", "internal.local, *.metrics.local")
+    monkeypatch.setenv("RHINOTAPE_IGNORE_FIELDS", "request_id, meta.ts")
+    monkeypatch.setenv("RHINOTAPE_IGNORE_QUERY_PARAMS", "nonce, sig")
+    monkeypatch.setenv("RHINOTAPE_REDACT_PII", "email, ssn")
+    monkeypatch.setenv("RHINOTAPE_MAX_COST", "0.5")
+    monkeypatch.setenv("RHINOTAPE_MAX_INTERACTIONS", "4")
+    monkeypatch.setenv("RHINOTAPE_ALLOW_PLAYBACK_REPEATS", "1")
+    monkeypatch.setenv("RHINOTAPE_PATCH_URLLIB", "on")
 
     cfg = TapeConfig.from_env()
     assert cfg.mode is TapeMode.NEW_EPISODES
@@ -115,10 +115,10 @@ def test_tape_config_from_env_validation_resolve_session_and_decorator(
     assert ".." not in trav.parts
     assert trav.suffix == ".gz"
 
-    # tape_from_env defaults to default.tape.json(.gz) or uses LLM_TAPE_CASSETTE
+    # tape_from_env defaults to default.tape.json(.gz) or uses RHINOTAPE_CASSETTE
     default_sess = tape_from_env()
     assert default_sess.cassette_path == tmp_path / "env_tapes" / "default.tape.json.gz"
-    monkeypatch.setenv("LLM_TAPE_CASSETTE", "custom_case")
+    monkeypatch.setenv("RHINOTAPE_CASSETTE", "custom_case")
     named_sess = tape_from_env()
     assert named_sess.cassette_path == tmp_path / "env_tapes" / "custom_case.tape.json.gz"
 
@@ -260,7 +260,7 @@ async def test_asgi_middleware_streaming_headers_skip_traversal_and_lifespan(
             await send({"type": "http.response.body", "body": b"ok"})
             return
 
-        session = scope["state"]["llm_tape"]
+        session = scope["state"]["rhinotape"]
         assert current_session() is session
         async with httpx.AsyncClient(
             transport=httpx.MockTransport(lambda r: _mock_openai_response("chunk1"))
@@ -394,7 +394,7 @@ async def test_asgi_middleware_streaming_headers_skip_traversal_and_lifespan(
         _recv2,
         _send3,
     )
-    assert "llm_tape" in existing_state
+    assert "rhinotape" in existing_state
     assert b"x-tape-calls" not in dict(plain_events[0]["headers"])
     assert custom_path.is_file()
 
@@ -429,7 +429,7 @@ def test_wsgi_middleware_streaming_iterator_close_and_error_lifecycle(tmp_path: 
             assert current_session() is None
             start_response("200 OK", [("Content-Type", "text/plain")])
             return [b"skipped"]
-        assert environ["llm_tape.session"] is require_session()
+        assert environ["rhinotape.session"] is require_session()
         start_response("200 OK", [("Content-Type", "text/plain")])
         return _StreamingBody(fail_midstream=environ["PATH_INFO"] == "/fail")
 
@@ -523,7 +523,7 @@ def test_unittest_mixin_pass_failure_no_save_and_strict_unused(tmp_path: Path) -
             ) as c:
                 c.post("https://api.openai.com/v1/chat/completions", json={"n": 1})
                 c.post("https://api.openai.com/v1/chat/completions", json={"n": 2})
-            self.llm_tape.assert_call_count(2)
+            self.rhinotape.assert_call_count(2)
 
         def test_fails_and_does_not_save(self) -> None:
             with httpx.Client(

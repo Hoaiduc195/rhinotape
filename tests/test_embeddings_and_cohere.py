@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from llm_tape.parsers import parse_llm_interaction
+from rhinotape.parsers import parse_llm_interaction
 
 
 def test_parse_openai_embeddings_and_pricing() -> None:

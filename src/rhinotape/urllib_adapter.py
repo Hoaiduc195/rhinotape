@@ -18,12 +18,12 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from llm_tape.models import Interaction, TapeMode
-from llm_tape.parsers import split_sse_chunks
-from llm_tape.scrubbing import encode_body_with_encoding
+from rhinotape.models import Interaction, TapeMode
+from rhinotape.parsers import split_sse_chunks
+from rhinotape.scrubbing import encode_body_with_encoding
 
 if TYPE_CHECKING:
-    from llm_tape.session import TapeSession
+    from rhinotape.session import TapeSession
 
 # urllib does not auto-decompress responses, so preserve content-encoding alongside raw bytes
 _STRIP_REPLAY_HEADERS = frozenset({"transfer-encoding", "content-length"})
@@ -35,7 +35,7 @@ _patch_refcount = 0
 _orig_opener_open: Any = urllib.request.OpenerDirector.open
 _session_getter: Callable[[], TapeSession | None] | None = None
 _in_urllib_open: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "llm_tape_in_urllib_open", default=False
+    "rhinotape_in_urllib_open", default=False
 )
 
 

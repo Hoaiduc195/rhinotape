@@ -11,7 +11,7 @@ import httpx
 import pytest
 import requests
 
-from llm_tape import Cassette, TapeMode, TapeTransport, tape
+from rhinotape import Cassette, TapeMode, TapeTransport, tape
 
 
 def test_multithreaded_httpx_and_requests_patch_refcount_isolation(tmp_path: Path) -> None:

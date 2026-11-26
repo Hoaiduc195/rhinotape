@@ -1,10 +1,10 @@
-"""Explicit httpx BaseTransport / AsyncBaseTransport wrappers for llm-tape."""
+"""Explicit httpx BaseTransport / AsyncBaseTransport wrappers for rhinotape."""
 
 from __future__ import annotations
 
 import httpx
 
-from llm_tape.session import TapeSession
+from rhinotape.session import TapeSession
 
 
 class TapeTransport(httpx.BaseTransport):

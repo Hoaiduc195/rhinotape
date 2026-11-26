@@ -10,8 +10,8 @@ from typing import Any
 import pytest
 import requests
 
-from llm_tape import Cassette, TapeMode, tape
-from llm_tape.requests_adapter import (
+from rhinotape import Cassette, TapeMode, tape
+from rhinotape.requests_adapter import (
     _ReplayRequestsRaw,
     acquire_requests_patch,
     release_requests_patch,
@@ -248,7 +248,7 @@ def test_requests_adapter_graceful_when_requests_missing(monkeypatch: pytest.Mon
 
 
 def test_requests_rv_review_regressions_redirects_binary_stream_and_read0(tmp_path: Path) -> None:
-    from llm_tape.requests_adapter import _RecordingRequestsRaw
+    from rhinotape.requests_adapter import _RecordingRequestsRaw
 
     # P1 #1: Redirect hops must not double-record or break replay
     def redirect_handler(req: requests.PreparedRequest, stream: bool) -> requests.Response:

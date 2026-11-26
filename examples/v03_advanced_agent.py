@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 
-from llm_tape import tape
+from rhinotape import tape
 
 
 def run_customer_support_agent(user_email: str, query: str) -> str:

@@ -45,12 +45,12 @@ jobs:
 
       - name: Run pytest with coverage
         run: |
-          uv run --python ${{ matrix.python-version }} coverage run --source=llm_tape -m pytest -v -W error
+          uv run --python ${{ matrix.python-version }} coverage run --source=rhinotape -m pytest -v -W error
           uv run --python ${{ matrix.python-version }} coverage report -m --fail-under=93
 
-      - name: Dogfood llm-tape verify (secrets & PII)
+      - name: Dogfood rhinotape verify (secrets & PII)
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
-        run: uv run --python ${{ matrix.python-version }} llm-tape verify . --check-secrets --check-pii
+        run: uv run --python ${{ matrix.python-version }} rhinotape verify . --check-secrets --check-pii
 
       - name: Build package
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
@@ -61,10 +61,10 @@ jobs:
         run: |
           uv venv --python ${{ matrix.python-version }} .tmp-no-pytest-venv
           uv pip install --python .tmp-no-pytest-venv/bin/python dist/*.whl
-          .tmp-no-pytest-venv/bin/python -c "import llm_tape; print(llm_tape.__version__)"
+          .tmp-no-pytest-venv/bin/python -c "import rhinotape; print(rhinotape.__version__)"
           .tmp-no-pytest-venv/bin/python - <<'PY'
           import httpx
-          from llm_tape import MemoryCassetteStore, TapeMode, TapeSession
+          from rhinotape import MemoryCassetteStore, TapeMode, TapeSession
 
           store = MemoryCassetteStore()
           resp_payload = {
@@ -96,5 +96,5 @@ jobs:
               rep.assert_tokens_under(50)
           print("Offline wheel smoke test OK")
           PY
-          .tmp-no-pytest-venv/bin/llm-tape --help
+          .tmp-no-pytest-venv/bin/rhinotape --help
           rm -rf .tmp-no-pytest-venv

@@ -10,9 +10,9 @@ import httpx
 import pytest
 import requests
 
-from llm_tape import Cassette, TapeReplayServer
-from llm_tape.cli import main as cli_main
-from llm_tape.models import Interaction, RecordedRequest, RecordedResponse
+from rhinotape import Cassette, TapeReplayServer
+from rhinotape.cli import main as cli_main
+from rhinotape.models import Interaction, RecordedRequest, RecordedResponse
 
 
 def test_tape_replay_server_json_sse_health_stats_and_clients(tmp_path: Path) -> None:

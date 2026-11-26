@@ -1,4 +1,4 @@
-"""Tests for Ponytail review fixes (server security/matching/caps) and `llm-tape run`."""
+"""Tests for Ponytail review fixes (server security/matching/caps) and `rhinotape run`."""
 
 from __future__ import annotations
 
@@ -11,12 +11,12 @@ from pathlib import Path
 import httpx
 import pytest
 
-import llm_tape.server as server_mod
-from llm_tape import Cassette, Interaction, RecordedRequest, RecordedResponse, TapeMode
-from llm_tape.cli import main as cli_main
-from llm_tape.models import LLMCallSummary, Usage
-from llm_tape.scrubbing import fingerprint_request
-from llm_tape.server import TapeReplayServer
+import rhinotape.server as server_mod
+from rhinotape import Cassette, Interaction, RecordedRequest, RecordedResponse, TapeMode
+from rhinotape.cli import main as cli_main
+from rhinotape.models import LLMCallSummary, Usage
+from rhinotape.scrubbing import fingerprint_request
+from rhinotape.server import TapeReplayServer
 
 
 def _make_sample_cassette(path: Path, *, tokens: int = 15, cost: float = 0.001) -> Cassette:
@@ -162,7 +162,7 @@ def test_cli_run_zero_code_replay_budgets_and_module_entry(
     child_script = tmp_path / "app.py"
     child_script.write_text(
         "import json, os, urllib.request\n"
-        "assert os.environ['OPENAI_API_KEY'] == 'llm-tape-replay'\n"
+        "assert os.environ['OPENAI_API_KEY'] == 'rhinotape-replay'\n"
         "url = os.environ['OPENAI_BASE_URL'] + '/chat/completions'\n"
         "payload = {'model':'gpt-4o-mini','messages':[{'role':'user','content':'hi'}]}\n"
         "req = urllib.request.Request(\n"
@@ -238,12 +238,12 @@ def test_cli_run_zero_code_replay_budgets_and_module_entry(
     assert cli_main(["run", str(cass_path), "--"]) == 2
     assert cli_main(["run", str(cass_path), "--max-cost", "nan", "--", sys.executable]) == 1
 
-    # 4. `python -m llm_tape --version` works cleanly
+    # 4. `python -m rhinotape --version` works cleanly
     proc = subprocess.run(
-        [sys.executable, "-m", "llm_tape", "--version"],
+        [sys.executable, "-m", "rhinotape", "--version"],
         capture_output=True,
         text=True,
         check=False,
     )
     assert proc.returncode == 0
-    assert "llm-tape" in proc.stdout
+    assert "rhinotape" in proc.stdout

@@ -1,11 +1,11 @@
-"""Example: testing a multi-step tool-calling agent in pytest with llm-tape."""
+"""Example: testing a multi-step tool-calling agent in pytest with rhinotape."""
 
 from __future__ import annotations
 
 import httpx
 import pytest
 
-from llm_tape import TapeSession
+from rhinotape import TapeSession
 
 
 def run_agent(query: str) -> str:
@@ -27,7 +27,7 @@ def run_agent(query: str) -> str:
     ignore_localhost=True,
     ignore_fields=["metadata.trace_id"],
 )
-def test_agent_stays_within_budget(llm_tape: TapeSession) -> None:
+def test_agent_stays_within_budget(rhinotape: TapeSession) -> None:
     """Run with `pytest --tape-mode=replay` in CI for zero-cost deterministic tests."""
     # In real projects, record once with real credentials, then commit the .tape.json file.
-    assert llm_tape is not None
+    assert rhinotape is not None

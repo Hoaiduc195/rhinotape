@@ -13,7 +13,7 @@ from typing import Any
 
 _logger = logging.getLogger(__name__)
 _BOUNDARY_CHARS = frozenset({"-", ".", ":", "@"})
-PRICING_FILE_ENV = "LLM_TAPE_PRICING_FILE"
+PRICING_FILE_ENV = "RHINOTAPE_PRICING_FILE"
 _pricing_cache_lock = threading.Lock()
 _pricing_file_cache: dict[str, tuple[int, int, dict[str, ModelPrice]]] = {}
 
@@ -101,7 +101,7 @@ class ModelPrice:
 
 
 # Reference USD per 1M tokens (input, output, cached_input). Users can override via
-# custom_pricing or LLM_TAPE_PRICING_FILE.
+# custom_pricing or RHINOTAPE_PRICING_FILE.
 DEFAULT_PRICING: dict[str, ModelPrice] = {
     # OpenAI
     "gpt-4o": ModelPrice(2.50, 10.00, cached_input_per_million=1.25),

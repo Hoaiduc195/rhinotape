@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import TapeAssertionError, TapeMode, tape
+from rhinotape import TapeAssertionError, TapeMode, tape
 
 
 def _agent_transport() -> httpx.MockTransport:

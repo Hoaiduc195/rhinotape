@@ -16,7 +16,7 @@ Instead, report it privately via GitHub Security Advisories on `Hoaiduc195/llm-t
 
 ## Security Guarantees & Best Practices
 
-- `llm-tape` automatically scrubs common API key headers (`Authorization`, `x-api-key`, `x-goog-api-key`, etc.), sensitive query parameters (`key`, `api_key`, `token`), and URL userinfo before writing cassettes.
+- `rhinotape` automatically scrubs common API key headers (`Authorization`, `x-api-key`, `x-goog-api-key`, etc.), sensitive query parameters (`key`, `api_key`, `token`), and URL userinfo before writing cassettes.
 - Use `redact_pii=True` (or specific PII presets) when recording prompts containing user data.
-- Run `llm-tape verify <dir> --check-secrets --check-pii` in CI or via `.pre-commit-hooks.yaml` to block accidental leaks.
+- Run `rhinotape verify <dir> --check-secrets --check-pii` in CI or via `.pre-commit-hooks.yaml` to block accidental leaks.
 - Cassette loading enforces `MAX_CASSETTE_BYTES` (100 MiB) on both plain JSON and gzip-compressed files to guard against zip bombs.

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 
-from llm_tape import TapeMode, tape
+from rhinotape import TapeMode, tape
 
 
 def test_anthropic_messages_json_and_sse_with_thinking_and_cache(tmp_path: Path) -> None:

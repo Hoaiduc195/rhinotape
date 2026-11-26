@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from llm_tape.models import CorruptCassetteError, Interaction, TapeNotFoundError
+from rhinotape.models import CorruptCassetteError, Interaction, TapeNotFoundError
 
 SCHEMA_VERSION = 2
 CASSETTE_EXTENSIONS: tuple[str, ...] = (".tape.json", ".tape.json.gz")
@@ -29,7 +29,7 @@ def cassette_json_schema() -> dict[str, Any]:
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": "https://github.com/Hoaiduc195/llm-tape/schemas/cassette-v2.schema.json",
-        "title": "llm-tape Cassette",
+        "title": "rhinotape Cassette",
         "description": "Recorded HTTP & SSE LLM interactions for deterministic offline replay.",
         "type": "object",
         "required": ["schema_version", "interactions"],
@@ -126,7 +126,7 @@ def cassette_json_schema() -> dict[str, Any]:
 
 
 def is_cassette_file(path: Path) -> bool:
-    """Return True if path has a supported llm-tape cassette extension."""
+    """Return True if path has a supported rhinotape cassette extension."""
     lower = path.name.lower()
     return any(lower.endswith(ext) for ext in CASSETTE_EXTENSIONS)
 

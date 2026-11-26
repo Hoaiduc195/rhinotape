@@ -1,4 +1,4 @@
-"""Core data models and exceptions for llm-tape."""
+"""Core data models and exceptions for rhinotape."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any
 
 
 class TapeMode(str, Enum):
-    """Controls how llm-tape records or replays HTTP interactions."""
+    """Controls how rhinotape records or replays HTTP interactions."""
 
     ONCE = "once"  # Replay if cassette exists; otherwise record and save.
     REPLAY = "replay"  # Strict offline replay; fail if cassette or interaction missing.
@@ -28,7 +28,7 @@ class TapeMode(str, Enum):
 
 
 class TapeError(Exception):
-    """Base exception for llm-tape."""
+    """Base exception for rhinotape."""
 
 
 class TapeNotFoundError(TapeError):

@@ -16,19 +16,19 @@ from typing import Any
 import httpx
 import pytest
 
-from llm_tape import Cassette, ModelPrice, TapeMode, tape
-from llm_tape.cli import _cassette_stats, build_parser
-from llm_tape.cli import main as cli_main
-from llm_tape.models import (
+from rhinotape import Cassette, ModelPrice, TapeMode, tape
+from rhinotape.cli import _cassette_stats, build_parser
+from rhinotape.cli import main as cli_main
+from rhinotape.models import (
     Interaction,
     LLMCallSummary,
     RecordedRequest,
     RecordedResponse,
     Usage,
 )
-from llm_tape.parsers import _detect_provider, parse_llm_interaction
-from llm_tape.pricing import PRICING_FILE_ENV, estimate_cost_usd, load_pricing_file
-from llm_tape.pytest_plugin import (
+from rhinotape.parsers import _detect_provider, parse_llm_interaction
+from rhinotape.pricing import PRICING_FILE_ENV, estimate_cost_usd, load_pricing_file
+from rhinotape.pytest_plugin import (
     _REPORT_KEY,
     _VIOLATIONS_KEY,
     _validate_tape_marker_kwargs,
@@ -449,10 +449,10 @@ def test_model_price_validation_and_pricing_file_errors_and_env_logging(
     broken = tmp_path / "broken_env_pricing.json"
     broken.write_text("{not valid json", encoding="utf-8")
     monkeypatch.setenv(PRICING_FILE_ENV, str(broken))
-    with caplog.at_level(logging.WARNING, logger="llm_tape.pricing"):
+    with caplog.at_level(logging.WARNING, logger="rhinotape.pricing"):
         cost = estimate_cost_usd("gpt-4o-mini", 1_000_000, 0)
     assert cost == pytest.approx(0.15)
-    assert any("LLM_TAPE_PRICING_FILE" in rec.message for rec in caplog.records)
+    assert any("RHINOTAPE_PRICING_FILE" in rec.message for rec in caplog.records)
 
 
 # --- 3. pytest_plugin.py ---------------------------------------------------
@@ -472,7 +472,7 @@ def test_pytest_plugin_unknown_marker_kwarg_and_forwarded_options(
         import pytest
 
         @pytest.mark.tape(redact_pi=True)
-        def test_typo(llm_tape):
+        def test_typo(rhinotape):
             pass
         """
     )
@@ -507,7 +507,7 @@ def test_pytest_plugin_forwards_all_tape_session_options_and_help(
         test_forward="""
         import httpx
         import pytest
-        from llm_tape import MemoryCassetteStore, ModelPrice
+        from rhinotape import MemoryCassetteStore, ModelPrice
 
         MEM_STORE = MemoryCassetteStore()
 
@@ -523,13 +523,13 @@ def test_pytest_plugin_forwards_all_tape_session_options_and_help(
             patch_httpx=False,
             store=MEM_STORE,
         )
-        def test_forwarded(llm_tape):
-            assert llm_tape.custom_pricing == {"custom-x": ModelPrice(10.0, 20.0)}
-            assert llm_tape.extra_sensitive_headers == ("x-internal-secret",)
-            assert llm_tape.extra_sensitive_query_params == ("session_sig",)
-            assert llm_tape.ignore_request is _ignore_health
-            assert llm_tape.patch_httpx is False
-            assert llm_tape.store is MEM_STORE
+        def test_forwarded(rhinotape):
+            assert rhinotape.custom_pricing == {"custom-x": ModelPrice(10.0, 20.0)}
+            assert rhinotape.extra_sensitive_headers == ("x-internal-secret",)
+            assert rhinotape.extra_sensitive_query_params == ("session_sig",)
+            assert rhinotape.ignore_request is _ignore_health
+            assert rhinotape.patch_httpx is False
+            assert rhinotape.store is MEM_STORE
         """
     )
     ok_res = pytester.runpytest()
@@ -576,7 +576,7 @@ def test_pytest_plugin_non_finite_cost_budget_and_atomic_write(tmp_path: Path) -
     assert ok_session.exitstatus == pytest.ExitCode.OK
     assert json_out.is_file()
     assert html_out.is_file()
-    assert "pytest llm-tape Report" in html_out.read_text(encoding="utf-8")
+    assert "pytest rhinotape Report" in html_out.read_text(encoding="utf-8")
 
     for bad_cost in (float("nan"), float("inf")):
         stash = pytest.Stash()
@@ -911,7 +911,7 @@ def test_cli_serve_sigterm_and_matching_flags(
     assert "Error:" in capsys.readouterr().err
 
     # Verify _cmd_serve forwards ignore_fields and match_on to TapeReplayServer
-    import llm_tape.server as server_mod
+    import rhinotape.server as server_mod
 
     captured_kwargs: dict[str, Any] = {}
     real_cls = server_mod.TapeReplayServer
@@ -950,7 +950,7 @@ def test_cli_serve_sigterm_and_matching_flags(
         assert captured_kwargs["ignore_fields"] == ["request_id", "trace_id"]
         assert captured_kwargs["match_on"] == ("method", "path", "body")
         out = capsys.readouterr().out
-        assert "Stopping llm-tape replay server." in out
+        assert "Stopping rhinotape replay server." in out
 
 
 def test_cassette_stats_delegation(tmp_path: Path) -> None:

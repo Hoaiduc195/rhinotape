@@ -12,8 +12,8 @@ import aiohttp
 import pytest
 from aiohttp import web
 
-from llm_tape import Cassette, TapeMode, tape
-from llm_tape.aiohttp_adapter import (
+from rhinotape import Cassette, TapeMode, tape
+from rhinotape.aiohttp_adapter import (
     _ReplayAiohttpStreamReader,
     acquire_aiohttp_patch,
     release_aiohttp_patch,

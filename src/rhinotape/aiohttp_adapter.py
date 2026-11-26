@@ -17,11 +17,11 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
-from llm_tape.models import Interaction, TapeMode
-from llm_tape.scrubbing import encode_body_with_encoding
+from rhinotape.models import Interaction, TapeMode
+from rhinotape.scrubbing import encode_body_with_encoding
 
 if TYPE_CHECKING:
-    from llm_tape.session import TapeSession
+    from rhinotape.session import TapeSession
 
 _STRIP_REPLAY_HEADERS = frozenset({"content-encoding", "transfer-encoding", "content-length"})
 _SSE_CONTENT_TYPES = ("text/event-stream", "application/x-ndjson", "application/ndjson")
@@ -31,7 +31,7 @@ _patch_refcount = 0
 _orig_client_request: Any = None
 _session_getter: Callable[[], TapeSession | None] | None = None
 _in_aiohttp_request: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "llm_tape_in_aiohttp_request", default=False
+    "rhinotape_in_aiohttp_request", default=False
 )
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llm_tape import (
+from rhinotape import (
     FileCassetteStore,
     Interaction,
     RecordedRequest,

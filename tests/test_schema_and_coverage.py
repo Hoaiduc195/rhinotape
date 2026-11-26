@@ -9,21 +9,21 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import TapeMode, TapeTransport, tape
-from llm_tape.aiohttp_adapter import (
+from rhinotape import TapeMode, TapeTransport, tape
+from rhinotape.aiohttp_adapter import (
     _extract_request_body,
     _RecordingAiohttpStreamReader,
     _ReplayAiohttpStreamReader,
 )
-from llm_tape.aiohttp_adapter import (
+from rhinotape.aiohttp_adapter import (
     _status_reason as aio_status_reason,
 )
-from llm_tape.cli import main as cli_main
-from llm_tape.urllib_adapter import (
+from rhinotape.cli import main as cli_main
+from rhinotape.urllib_adapter import (
     _extract_urllib_request,
     _ReplayUrllibResponse,
 )
-from llm_tape.urllib_adapter import (
+from rhinotape.urllib_adapter import (
     _status_reason as urllib_status_reason,
 )
 

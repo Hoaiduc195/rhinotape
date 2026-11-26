@@ -7,15 +7,15 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import (
+from rhinotape import (
     PII_PRESETS,
     Cassette,
     TapeMode,
     resolve_pii_patterns,
     tape,
 )
-from llm_tape.cli import main as cli_main
-from llm_tape.scrubbing import (
+from rhinotape.cli import main as cli_main
+from rhinotape.scrubbing import (
     REDACTED,
     URL_USERINFO_REDACTED,
     redact_text,

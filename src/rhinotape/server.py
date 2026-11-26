@@ -17,18 +17,18 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from llm_tape._version import __version__
-from llm_tape.cassette import MAX_CASSETTE_BYTES, Cassette, is_cassette_file, iter_cassette_files
-from llm_tape.models import (
+from rhinotape._version import __version__
+from rhinotape.cassette import MAX_CASSETTE_BYTES, Cassette, is_cassette_file, iter_cassette_files
+from rhinotape.models import (
     CorruptCassetteError,
     Interaction,
     RecordedRequest,
     RecordedResponse,
     TapeMode,
 )
-from llm_tape.parsers import parse_llm_interaction, redact_stream_chunks, split_sse_chunks
-from llm_tape.pricing import ModelPrice
-from llm_tape.scrubbing import (
+from rhinotape.parsers import parse_llm_interaction, redact_stream_chunks, split_sse_chunks
+from rhinotape.pricing import ModelPrice
+from rhinotape.scrubbing import (
     DEFAULT_MATCH_ON,
     compile_patterns,
     compile_sensitive_headers,
@@ -64,7 +64,7 @@ _CORS_ALLOW_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD"
 _HEX_DIGITS = frozenset(b"0123456789abcdefABCDEF")
 _MAX_CHUNK_LINE_BYTES = 4096
 _MAX_TRAILER_LINES = 64
-_HANDLED_EXT_KEY = "_llm_tape_handled"
+_HANDLED_EXT_KEY = "_rhinotape_handled"
 _VALID_ASSERT_KEYS = frozenset(
     {
         "call_count",
@@ -481,7 +481,7 @@ class TapeReplayServer:
                 if dest is None:
                     raise ValueError("No active cassette file path configured to save.")
                 interactions = self._current_cassette_interactions_locked()
-                meta = {**self._existing_metadata, "llm_tape_version": __version__}
+                meta = {**self._existing_metadata, "rhinotape_version": __version__}
                 if target_path is None:
                     self._dirty = False
             Cassette(path=dest, interactions=interactions, metadata=meta).save()

@@ -8,8 +8,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import Cassette, TapeReplayServer
-from llm_tape.html_report import _fmt_body
+from rhinotape import Cassette, TapeReplayServer
+from rhinotape.html_report import _fmt_body
 
 
 def test_server_edge_cases_methods_and_invalid_content_length(tmp_path: Path) -> None:

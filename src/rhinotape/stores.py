@@ -6,8 +6,8 @@ import threading
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from llm_tape.cassette import Cassette, iter_cassette_files
-from llm_tape.models import TapeNotFoundError
+from rhinotape.cassette import Cassette, iter_cassette_files
+from rhinotape.models import TapeNotFoundError
 
 
 @runtime_checkable

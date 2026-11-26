@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from llm_tape import Cassette
-from llm_tape.cli import main as cli_main
-from llm_tape.models import (
+from rhinotape import Cassette
+from rhinotape.cli import main as cli_main
+from rhinotape.models import (
     Interaction,
     LLMCallSummary,
     RecordedRequest,

@@ -1,4 +1,4 @@
-"""Comprehensive tests for llm-tape v0.3.0 features."""
+"""Comprehensive tests for rhinotape v0.3.0 features."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import (
+from rhinotape import (
     Cassette,
     ModelPrice,
     TapeAssertionError,
@@ -23,10 +23,10 @@ from llm_tape import (
     redact_text,
     tape,
 )
-from llm_tape.cli import main as cli_main
-from llm_tape.parsers import parse_llm_interaction
-from llm_tape.pricing import PRICING_FILE_ENV
-from llm_tape.scrubbing import fingerprint_request, validate_match_on
+from rhinotape.cli import main as cli_main
+from rhinotape.parsers import parse_llm_interaction
+from rhinotape.pricing import PRICING_FILE_ENV
+from rhinotape.scrubbing import fingerprint_request, validate_match_on
 
 pytest_plugins = ["pytester"]
 
@@ -385,7 +385,7 @@ def test_new_assertions_tool_args_unused_and_latency(tmp_path: Path) -> None:
             client.post("https://api.openai.com/v1/chat/completions", json={"step": 1})
             client.post("https://api.openai.com/v1/chat/completions", json={"step": 2})
 
-    from llm_tape.session import replace_response
+    from rhinotape.session import replace_response
 
     # Consume only 1 of 2 -> assert_no_unused_interactions fails
     with tape(
@@ -529,14 +529,14 @@ def test_pytester_ini_defaults(pytester: pytest.Pytester, tmp_path: Path) -> Non
                 },
             )
 
-        def test_uses_ini_defaults(llm_tape):
+        def test_uses_ini_defaults(rhinotape):
             with httpx.Client(transport=httpx.MockTransport(_h)) as client:
                 client.get("http://127.0.0.1:8000/ping")
                 client.post(
                     "https://api.openai.com/v1/chat/completions?ts=123",
                     json={"metadata": {"trace_id": "abc"}, "msg": "hi"},
                 )
-            llm_tape.assert_call_count(1)
+            rhinotape.assert_call_count(1)
         """
     )
     res1 = pytester.runpytest()
@@ -759,7 +759,7 @@ def test_rv_review_regressions_p1_and_p2(
         session.assert_call_count(3)
         session.assert_no_unused_interactions()
 
-    # P1 #2: llm-tape redact --field must ALSO redact llm.text
+    # P1 #2: rhinotape redact --field must ALSO redact llm.text
     c_field = tmp_path / "field_redact.tape.json"
 
     def oai_handler(request: httpx.Request) -> httpx.Response:

@@ -8,9 +8,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import TapeMode, UnmatchedRequestError, tape
-from llm_tape.cli import main as cli_main
-from llm_tape.scrubbing import summarize_json_diff
+from rhinotape import TapeMode, UnmatchedRequestError, tape
+from rhinotape.cli import main as cli_main
+from rhinotape.scrubbing import summarize_json_diff
 
 
 def test_summarize_json_diff_and_unmatched_error_attributes(tmp_path: Path) -> None:

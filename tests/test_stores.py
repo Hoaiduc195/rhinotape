@@ -7,7 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import (
+from rhinotape import (
     Cassette,
     CassetteStore,
     CorruptCassetteError,

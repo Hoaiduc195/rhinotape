@@ -8,7 +8,7 @@ from pathlib import Path
 
 import httpx
 
-from llm_tape import Interaction, TapeMode, TapeTransport, replace_response, tape
+from rhinotape import Interaction, TapeMode, TapeTransport, replace_response, tape
 
 
 def main() -> None:

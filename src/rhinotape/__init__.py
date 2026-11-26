@@ -1,8 +1,8 @@
-"""llm-tape: Record, replay, and assert on LLM HTTP & SSE calls in pytest."""
+"""rhinotape: Record, replay, and assert on LLM HTTP & SSE calls in pytest."""
 
-from llm_tape._version import __version__
-from llm_tape.cassette import Cassette
-from llm_tape.chaos import (
+from rhinotape._version import __version__
+from rhinotape.cassette import Cassette
+from rhinotape.chaos import (
     ReplayHook,
     chain_replay_hooks,
     corrupt_json_body,
@@ -11,8 +11,8 @@ from llm_tape.chaos import (
     inject_latency,
     truncate_stream,
 )
-from llm_tape.html_report import render_html_report
-from llm_tape.integrations import (
+from rhinotape.html_report import render_html_report
+from rhinotape.integrations import (
     GenericHTTPRequest,
     GenericHTTPResponse,
     GlobalTapeHandle,
@@ -30,7 +30,7 @@ from llm_tape.integrations import (
     require_session,
     tape_from_env,
 )
-from llm_tape.matchers import (
+from rhinotape.matchers import (
     RequestMatcher,
     match_all,
     match_any,
@@ -40,7 +40,7 @@ from llm_tape.matchers import (
     match_method,
     match_path,
 )
-from llm_tape.models import (
+from rhinotape.models import (
     CorruptCassetteError,
     Interaction,
     LLMCallSummary,
@@ -54,14 +54,14 @@ from llm_tape.models import (
     UnmatchedRequestError,
     Usage,
 )
-from llm_tape.pricing import (
+from rhinotape.pricing import (
     DEFAULT_PRICING,
     ModelPrice,
     estimate_cache_savings_usd,
     estimate_cost_usd,
     load_pricing_file,
 )
-from llm_tape.scrubbing import (
+from rhinotape.scrubbing import (
     DEFAULT_MATCH_ON,
     MATCH_PATH_AND_BODY,
     MATCH_RELAXED,
@@ -80,10 +80,10 @@ from llm_tape.scrubbing import (
     resolve_pii_patterns,
     summarize_json_diff,
 )
-from llm_tape.server import TapeReplayServer
-from llm_tape.session import TapeSession, replace_response, tape, use_tape
-from llm_tape.stores import CassetteStore, FileCassetteStore, MemoryCassetteStore
-from llm_tape.transport import AsyncTapeTransport, TapeTransport
+from rhinotape.server import TapeReplayServer
+from rhinotape.session import TapeSession, replace_response, tape, use_tape
+from rhinotape.stores import CassetteStore, FileCassetteStore, MemoryCassetteStore
+from rhinotape.transport import AsyncTapeTransport, TapeTransport
 
 __all__ = [
     "AsyncTapeTransport",

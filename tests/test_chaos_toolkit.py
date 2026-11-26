@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import (
+from rhinotape import (
     TapeMode,
     chain_replay_hooks,
     corrupt_json_body,

@@ -1,4 +1,4 @@
-"""Command-line interface for inspecting, verifying, and diffing llm-tape cassettes."""
+"""Command-line interface for inspecting, verifying, and diffing rhinotape cassettes."""
 
 from __future__ import annotations
 
@@ -23,9 +23,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
-from llm_tape._version import __version__ as _VERSION
-from llm_tape.cassette import Cassette, cassette_json_schema, iter_cassette_files
-from llm_tape.models import (
+from rhinotape._version import __version__ as _VERSION
+from rhinotape.cassette import Cassette, cassette_json_schema, iter_cassette_files
+from rhinotape.models import (
     CorruptCassetteError,
     Interaction,
     LLMCallSummary,
@@ -34,15 +34,15 @@ from llm_tape.models import (
     TapeError,
     ToolCall,
 )
-from llm_tape.parsers import parse_llm_interaction, redact_stream_chunks
-from llm_tape.pricing import (
+from rhinotape.parsers import parse_llm_interaction, redact_stream_chunks
+from rhinotape.pricing import (
     DEFAULT_PRICING,
     PRICING_FILE_ENV,
     ModelPrice,
     estimate_cache_savings_usd,
     load_pricing_file,
 )
-from llm_tape.scrubbing import (
+from rhinotape.scrubbing import (
     DEFAULT_MATCH_ON,
     PII_PRESETS,
     compile_patterns,
@@ -1332,7 +1332,7 @@ def _render_har(cassettes: list[Cassette]) -> str:
     payload = {
         "log": {
             "version": "1.2",
-            "creator": {"name": "llm-tape", "version": _VERSION},
+            "creator": {"name": "rhinotape", "version": _VERSION},
             "entries": entries,
         }
     }
@@ -1342,7 +1342,7 @@ def _render_har(cassettes: list[Cassette]) -> str:
 def _render_junit(cassettes: list[Cassette], base_dir: Path) -> str:
     failures = 0
     total_time_s = 0.0
-    suite = ET.Element("testsuite", name="llm-tape", tests=str(len(cassettes)))
+    suite = ET.Element("testsuite", name="rhinotape", tests=str(len(cassettes)))
     for c in cassettes:
         s = _cassette_stats(c)
         rel = str(c.path.relative_to(base_dir))
@@ -1351,7 +1351,7 @@ def _render_junit(cassettes: list[Cassette], base_dir: Path) -> str:
         tc = ET.SubElement(
             suite,
             "testcase",
-            classname="llm_tape",
+            classname="rhinotape",
             name=rel,
             time=f"{t_sec:.6f}",
         )
@@ -1392,9 +1392,9 @@ def _cmd_export(target: Path, *, fmt: str, output: Path | None = None) -> int:
     if fmt == "har":
         rendered = _render_har(cassettes)
     elif fmt == "html":
-        from llm_tape.html_report import render_html_report
+        from rhinotape.html_report import render_html_report
 
-        rendered = render_html_report(cassettes, title=f"llm-tape Trace ({target})")
+        rendered = render_html_report(cassettes, title=f"rhinotape Trace ({target})")
     elif fmt == "junit":
         rendered = _render_junit(cassettes, base_dir)
     elif fmt == "csv":
@@ -1668,7 +1668,7 @@ def _cmd_stats(target: Path, *, as_json: bool = False) -> int:
 
 
 def _cmd_pricing(*, prefix: str | None = None, as_json: bool = False) -> int:
-    """Display effective built-in (+ LLM_TAPE_PRICING_FILE) model pricing table."""
+    """Display effective built-in (+ RHINOTAPE_PRICING_FILE) model pricing table."""
     table: dict[str, ModelPrice] = dict(DEFAULT_PRICING)
     env_file = os.environ.get(PRICING_FILE_ENV)
     if env_file and Path(env_file).is_file():
@@ -2094,8 +2094,8 @@ def _build_cli_replay_server(
     match_on: list[str] | None = None,
     auto_save: bool = True,
 ) -> Any:
-    from llm_tape.models import TapeMode
-    from llm_tape.server import TapeReplayServer
+    from rhinotape.models import TapeMode
+    from rhinotape.server import TapeReplayServer
 
     coerced_mode = TapeMode.coerce(mode)
     if coerced_mode is TapeMode.REPLAY and not source.exists():
@@ -2184,9 +2184,9 @@ def _cmd_serve(
     try:
         while not stop_event.wait(timeout=0.5):
             pass
-        print("\nStopping llm-tape replay server.")
+        print("\nStopping rhinotape replay server.")
     except KeyboardInterrupt:
-        print("\nStopping llm-tape replay server.")
+        print("\nStopping rhinotape replay server.")
     finally:
         if sigterm_installed:
             signal.signal(signal.SIGTERM, prev_sigterm)
@@ -2214,7 +2214,7 @@ def _cmd_run(
     quiet: bool = False,
 ) -> int:
     """Run any command against an ephemeral local TapeReplayServer with zero code changes."""
-    from llm_tape.models import TapeMode
+    from rhinotape.models import TapeMode
 
     cmd = list(command)
     if cmd and cmd[0] == "--":
@@ -2251,16 +2251,16 @@ def _cmd_run(
     server.start()
     try:
         env = dict(os.environ)
-        env["LLM_TAPE_URL"] = server.url
+        env["RHINOTAPE_URL"] = server.url
         if inject_env:
             env["OPENAI_BASE_URL"] = f"{server.url}/v1"
             env["ANTHROPIC_BASE_URL"] = server.url
             env["GOOGLE_GEMINI_BASE_URL"] = server.url
             env["OLLAMA_HOST"] = server.url
             if server.mode is TapeMode.REPLAY:
-                env.setdefault("OPENAI_API_KEY", "llm-tape-replay")
-                env.setdefault("ANTHROPIC_API_KEY", "llm-tape-replay")
-                env.setdefault("GEMINI_API_KEY", "llm-tape-replay")
+                env.setdefault("OPENAI_API_KEY", "rhinotape-replay")
+                env.setdefault("ANTHROPIC_API_KEY", "rhinotape-replay")
+                env.setdefault("GEMINI_API_KEY", "rhinotape-replay")
         try:
             proc = subprocess.run(cmd, env=env, check=False)
         except OSError as exc:
@@ -2283,7 +2283,7 @@ def _cmd_run(
         if not quiet:
             calls = int(st["served_requests"]) + int(st["recorded_interactions"])
             print(
-                f"[llm-tape run] calls={calls} tokens={st['total_tokens']} "
+                f"[rhinotape run] calls={calls} tokens={st['total_tokens']} "
                 f"cost=${st['estimated_cost_usd']:.6f}",
                 file=sys.stderr,
             )
@@ -2295,7 +2295,7 @@ def _cmd_run(
             code, res = server.evaluate_assertions(spec)
             if code != 200:
                 for msg in res.get("failures", []):
-                    print(f"[llm-tape run] FAILED: {msg}", file=sys.stderr)
+                    print(f"[rhinotape run] FAILED: {msg}", file=sys.stderr)
                 return 1
         return 0
     finally:
@@ -2304,8 +2304,8 @@ def _cmd_run(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="llm-tape",
-        description="Inspect, verify, diff, and redact llm-tape .tape.json cassettes.",
+        prog="rhinotape",
+        description="Inspect, verify, diff, and redact rhinotape .tape.json cassettes.",
     )
     parser.add_argument(
         "--version",
@@ -2642,7 +2642,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write split cassettes as .tape.json.gz.",
     )
 
-    from llm_tape.models import TapeMode
+    from rhinotape.models import TapeMode
 
     p_serve = sub.add_parser(
         "serve",
@@ -2754,14 +2754,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--no-inject-env",
         action="store_true",
-        help="Only set LLM_TAPE_URL; do not override provider *_BASE_URL env vars.",
+        help="Only set RHINOTAPE_URL; do not override provider *_BASE_URL env vars.",
     )
     p_run.add_argument("--quiet", action="store_true", help="Suppress summary line on stderr.")
     p_run.add_argument("cmd", nargs="*", help="Command to execute after `--`.")
 
     p_pricing = sub.add_parser(
         "pricing",
-        help="Display built-in (and LLM_TAPE_PRICING_FILE) USD per 1M token pricing table.",
+        help="Display built-in (and RHINOTAPE_PRICING_FILE) USD per 1M token pricing table.",
     )
     p_pricing.add_argument(
         "--filter",

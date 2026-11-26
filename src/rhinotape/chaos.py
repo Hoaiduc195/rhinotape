@@ -6,8 +6,8 @@ import math
 from collections.abc import Callable
 from typing import Any
 
-from llm_tape.models import Interaction
-from llm_tape.session import replace_response
+from rhinotape.models import Interaction
+from rhinotape.session import replace_response
 
 ReplayHook = Callable[[Interaction, int], Interaction | None]
 

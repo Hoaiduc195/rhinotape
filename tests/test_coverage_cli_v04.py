@@ -7,8 +7,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import TapeMode, tape
-from llm_tape.cli import main as cli_main
+from rhinotape import TapeMode, tape
+from rhinotape.cli import main as cli_main
 
 
 def test_cli_v04_empty_missing_and_edge_branches(

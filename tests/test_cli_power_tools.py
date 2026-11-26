@@ -9,9 +9,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import Cassette, TapeMode, tape
-from llm_tape.cli import main as cli_main
-from llm_tape.models import Interaction, LLMCallSummary, RecordedRequest, RecordedResponse
+from rhinotape import Cassette, TapeMode, tape
+from rhinotape.cli import main as cli_main
+from rhinotape.models import Interaction, LLMCallSummary, RecordedRequest, RecordedResponse
 
 
 def _seed_cassettes(tmp_path: Path) -> tuple[Path, Path]:

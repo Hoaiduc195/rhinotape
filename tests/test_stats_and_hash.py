@@ -1,4 +1,4 @@
-"""Tests for Wave 7: Cassette.content_hash() and CLI `llm-tape stats` breakdown."""
+"""Tests for Wave 7: Cassette.content_hash() and CLI `rhinotape stats` breakdown."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from llm_tape import Cassette
-from llm_tape.cli import main
-from llm_tape.models import (
+from rhinotape import Cassette
+from rhinotape.cli import main
+from rhinotape.models import (
     Interaction,
     LLMCallSummary,
     RecordedRequest,

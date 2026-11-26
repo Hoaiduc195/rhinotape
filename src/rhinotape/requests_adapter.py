@@ -14,12 +14,12 @@ import time
 from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 
-from llm_tape.models import Interaction, TapeMode
-from llm_tape.parsers import split_sse_chunks
-from llm_tape.scrubbing import encode_body_with_encoding
+from rhinotape.models import Interaction, TapeMode
+from rhinotape.parsers import split_sse_chunks
+from rhinotape.scrubbing import encode_body_with_encoding
 
 if TYPE_CHECKING:
-    from llm_tape.session import TapeSession
+    from rhinotape.session import TapeSession
 
 _STRIP_REPLAY_HEADERS = frozenset({"content-encoding", "transfer-encoding", "content-length"})
 _SSE_CONTENT_TYPES = ("text/event-stream", "application/x-ndjson", "application/ndjson")
@@ -29,7 +29,7 @@ _patch_refcount = 0
 _orig_session_send: Any = None
 _session_getter: Callable[[], TapeSession | None] | None = None
 _in_requests_send: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "llm_tape_in_requests_send", default=False
+    "rhinotape_in_requests_send", default=False
 )
 
 

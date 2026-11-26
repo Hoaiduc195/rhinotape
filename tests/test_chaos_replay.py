@@ -9,7 +9,7 @@ import httpx
 import pytest
 import requests
 
-from llm_tape import (
+from rhinotape import (
     Interaction,
     TapeAssertionError,
     TapeMode,
@@ -107,7 +107,7 @@ async def test_on_replay_mutates_llm_body_and_validates_return_type(tmp_path: Pa
 
 
 def test_replace_response_bytes_stream_clear_and_custom_pricing(tmp_path: Path) -> None:
-    from llm_tape import Cassette, ModelPrice
+    from rhinotape import Cassette, ModelPrice
 
     tape_path = tmp_path / "edge.tape.json"
     _record_basic_tape(tape_path)

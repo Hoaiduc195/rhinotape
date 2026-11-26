@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import TapeAssertionError, TapeMode, tape
+from rhinotape import TapeAssertionError, TapeMode, tape
 
 
 def test_assert_json_output_and_per_call_budgets(tmp_path: Path) -> None:

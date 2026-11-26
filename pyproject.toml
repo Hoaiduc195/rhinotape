@@ -3,7 +3,7 @@ requires = ["hatchling>=1.25.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "llm-tape"
+name = "rhinotape"
 dynamic = ["version"]
 description = "Record, replay, and assert on LLM HTTP & SSE streaming calls (tokens, cost, tool calls) in pytest."
 readme = "README.md"
@@ -11,7 +11,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [
-    { name = "llm-tape contributors" },
+    { name = "rhinotape contributors" },
 ]
 keywords = ["llm", "testing", "pytest", "vcr", "httpx", "sse", "openai", "anthropic", "gemini", "agents"]
 classifiers = [
@@ -51,16 +51,16 @@ dev = [
 ]
 
 [project.scripts]
-llm-tape = "llm_tape.cli:main"
+rhinotape = "rhinotape.cli:main"
 
 [project.entry-points.pytest11]
-llm_tape = "llm_tape.pytest_plugin"
+rhinotape = "rhinotape.pytest_plugin"
 
 [tool.hatch.version]
-path = "src/llm_tape/_version.py"
+path = "src/rhinotape/_version.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/llm_tape"]
+packages = ["src/rhinotape"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -78,5 +78,5 @@ select = ["E", "F", "I", "UP", "B"]
 python_version = "3.10"
 strict = true
 warn_unreachable = true
-packages = ["llm_tape"]
+packages = ["rhinotape"]
 mypy_path = "src"

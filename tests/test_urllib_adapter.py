@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_tape import Cassette, TapeMode, tape
+from rhinotape import Cassette, TapeMode, tape
 
 
 class _LocalLLMHandler(http.server.BaseHTTPRequestHandler):
@@ -163,7 +163,7 @@ def test_urllib_rv_review_regressions_file_url_bytesio_and_content_encoding(
     import gzip
     import io
 
-    from llm_tape.urllib_adapter import _build_email_headers, _extract_urllib_request
+    from rhinotape.urllib_adapter import _build_email_headers, _extract_urllib_request
 
     # P1 #1: Content-Encoding header preserved alongside raw bytes
     hdrs = _build_email_headers({"Content-Encoding": "gzip", "Content-Type": "application/json"})

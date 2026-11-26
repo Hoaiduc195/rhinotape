@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from llm_tape.cassette import Cassette
-from llm_tape.cli import main as cli_main
-from llm_tape.html_report import render_html_report
-from llm_tape.models import (
+from rhinotape.cassette import Cassette
+from rhinotape.cli import main as cli_main
+from rhinotape.html_report import render_html_report
+from rhinotape.models import (
     Interaction,
     LLMCallSummary,
     RecordedRequest,
@@ -156,7 +156,7 @@ def test_pytest_tape_html_report_flag(pytester: pytest.Pytester) -> None:
             )
 
         @pytest.mark.tape(mode="record")
-        def test_record_for_html(llm_tape):
+        def test_record_for_html(rhinotape):
             with httpx.Client(transport=_transport()) as client:
                 r = client.post(
                     "https://api.openai.com/v1/chat/completions",

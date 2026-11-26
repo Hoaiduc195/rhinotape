@@ -7,7 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import Cassette, Interaction, TapeAssertionError, TapeMode, replace_response, tape
+from rhinotape import Cassette, Interaction, TapeAssertionError, TapeMode, replace_response, tape
 
 
 def _mock_transport(cost_tokens: int = 1000) -> httpx.MockTransport:
@@ -58,7 +58,7 @@ def test_on_record_filter_transform_and_metadata_and_save(tmp_path: Path) -> Non
     assert len(loaded.interactions) == 1
     assert loaded.metadata["env"] == "ci"
     assert loaded.metadata["suite"] == "agent-v2"
-    assert "llm_tape_version" in loaded.metadata
+    assert "rhinotape_version" in loaded.metadata
 
     # Cassette.add_interaction fluent API
     loaded.add_interaction(loaded.interactions[0])

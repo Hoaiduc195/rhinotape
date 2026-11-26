@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import (
+from rhinotape import (
     AsyncTapeTransport,
     Cassette,
     CorruptCassetteError,
@@ -17,11 +17,11 @@ from llm_tape import (
     TapeTransport,
     tape,
 )
-from llm_tape.cli import main as cli_main
-from llm_tape.models import RecordedRequest
-from llm_tape.parsers import parse_llm_interaction, parse_sse_events
-from llm_tape.pricing import estimate_cost_usd
-from llm_tape.scrubbing import (
+from rhinotape.cli import main as cli_main
+from rhinotape.models import RecordedRequest
+from rhinotape.parsers import parse_llm_interaction, parse_sse_events
+from rhinotape.pricing import estimate_cost_usd
+from rhinotape.scrubbing import (
     decode_body,
     decode_body_with_encoding,
     encode_body,

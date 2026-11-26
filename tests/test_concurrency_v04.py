@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 
-from llm_tape import (
+from rhinotape import (
     Cassette,
     MemoryCassetteStore,
     TapeMode,

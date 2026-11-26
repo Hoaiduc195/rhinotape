@@ -7,7 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import TapeMode, TapeTransport, UnmatchedRequestError, tape
+from rhinotape import TapeMode, TapeTransport, UnmatchedRequestError, tape
 
 pytest_plugins = ["pytester"]
 
@@ -77,9 +77,9 @@ def test_pytester_strict_unused_fails_on_dead_recorded_interactions(
         """
         import os
         import httpx
-        from llm_tape import TapeTransport
+        from rhinotape import TapeTransport
 
-        def test_agent_two_calls(llm_tape):
+        def test_agent_two_calls(rhinotape):
             upstream = httpx.MockTransport(
                 lambda req: httpx.Response(
                     200,
@@ -89,7 +89,7 @@ def test_pytester_strict_unused_fails_on_dead_recorded_interactions(
                     },
                 )
             )
-            with httpx.Client(transport=TapeTransport(llm_tape, upstream=upstream)) as c:
+            with httpx.Client(transport=TapeTransport(rhinotape, upstream=upstream)) as c:
                 c.post("https://api.openai.com/v1/chat/completions", json={"step": 1})
                 if os.environ.get("RUN_STEP_2", "1") == "1":
                     c.post("https://api.openai.com/v1/chat/completions", json={"step": 2})

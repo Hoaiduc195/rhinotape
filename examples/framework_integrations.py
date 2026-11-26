@@ -1,4 +1,4 @@
-"""Offline runnable showcase of llm-tape framework integrations.
+"""Offline runnable showcase of rhinotape framework integrations.
 
 Demonstrates:
 1. TapeConfig.from_env() + current_session() / require_session()
@@ -24,8 +24,8 @@ from typing import Any
 
 import httpx
 
-from llm_tape import MemoryCassetteStore, TapeMode
-from llm_tape.integrations import (
+from rhinotape import MemoryCassetteStore, TapeMode
+from rhinotape.integrations import (
     GenericHTTPRequest,
     GenericHTTPResponse,
     TapeASGIMiddleware,
@@ -56,13 +56,13 @@ def _mock_openai_transport(reply: str = "Hello from offline mock!") -> httpx.Moc
 
 
 def demo_config_and_httpx_factory(tmp_dir: Path) -> None:
-    os.environ["LLM_TAPE_DIR"] = str(tmp_dir / "env_tapes")
-    os.environ["LLM_TAPE_MODE"] = "once"
-    os.environ["LLM_TAPE_REDACT_PII"] = "email"
+    os.environ["RHINOTAPE_DIR"] = str(tmp_dir / "env_tapes")
+    os.environ["RHINOTAPE_MODE"] = "once"
+    os.environ["RHINOTAPE_REDACT_PII"] = "email"
     try:
         cfg = TapeConfig.from_env()
     finally:
-        for key in ("LLM_TAPE_DIR", "LLM_TAPE_MODE", "LLM_TAPE_REDACT_PII"):
+        for key in ("RHINOTAPE_DIR", "RHINOTAPE_MODE", "RHINOTAPE_REDACT_PII"):
             os.environ.pop(key, None)
 
     # Record with explicit httpx client factory (no global monkey-patching required)
@@ -94,7 +94,7 @@ async def demo_asgi_middleware(tmp_dir: Path) -> None:
 
     async def mini_asgi_app(scope: dict[str, Any], receive: Any, send: Any) -> None:
         del receive
-        session = scope["state"]["llm_tape"]
+        session = scope["state"]["rhinotape"]
         assert current_session() is session
         with httpx.Client(transport=upstream) as client:
             resp = client.post(
@@ -139,7 +139,7 @@ def demo_wsgi_middleware(tmp_dir: Path) -> None:
     upstream = _mock_openai_transport("WSGI reply")
 
     def mini_wsgi_app(environ: dict[str, Any], start_response: Any) -> list[bytes]:
-        assert environ["llm_tape.session"] is require_session()
+        assert environ["rhinotape.session"] is require_session()
         with httpx.Client(transport=upstream) as client:
             resp = client.post(
                 "https://api.openai.com/v1/chat/completions",
@@ -177,7 +177,7 @@ def demo_unittest_mixin(tmp_dir: Path) -> None:
                     json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "u"}]},
                 )
                 self.assertEqual(r.json()["choices"][0]["message"]["content"], "unittest ok")
-            self.llm_tape.assert_call_count(1)
+            self.rhinotape.assert_call_count(1)
 
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(DemoAgentTests)
     result = unittest.TestResult()
@@ -239,7 +239,7 @@ def main() -> None:
         demo_wsgi_middleware(tmp_dir)
         demo_unittest_mixin(tmp_dir)
         demo_generic_bridge()
-    print("All llm-tape framework integration demos passed offline!")
+    print("All rhinotape framework integration demos passed offline!")
 
 
 if __name__ == "__main__":

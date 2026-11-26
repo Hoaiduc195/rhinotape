@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import (
+from rhinotape import (
     Cassette,
     CorruptCassetteError,
     ModelPrice,
@@ -18,7 +18,7 @@ from llm_tape import (
     estimate_cost_usd,
     tape,
 )
-from llm_tape.scrubbing import (
+from rhinotape.scrubbing import (
     decode_body_with_encoding,
     encode_body_with_encoding,
     scrub_url,
@@ -284,7 +284,7 @@ def test_corrupt_cassette_and_transport_upstream_ownership(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_use_tape_decorator_sync_and_async_and_reentrancy_guard(tmp_path: Path) -> None:
-    from llm_tape import TapeError, use_tape
+    from rhinotape import TapeError, use_tape
 
     sync_path = tmp_path / "dec_sync.tape.json"
     async_path = tmp_path / "dec_async.tape.json"

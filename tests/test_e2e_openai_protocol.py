@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 
-from llm_tape import TapeMode, tape
+from rhinotape import TapeMode, tape
 
 
 def test_openai_chat_and_responses_sse_roundtrip(tmp_path: Path) -> None:

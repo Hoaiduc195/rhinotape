@@ -15,5 +15,5 @@
 - [ ] `uv run ruff check src tests examples` & `uv run ruff format --check src tests examples` pass
 - [ ] `uv run mypy` passes (`strict = true`)
 - [ ] `uv run pytest -v -W error` passes with coverage `>= 93%`
-- [ ] `uv run llm-tape verify . --check-secrets --check-pii` passes
+- [ ] `uv run rhinotape verify . --check-secrets --check-pii` passes
 - [ ] No new hard runtime dependencies added (`httpx` remains the sole core dependency)

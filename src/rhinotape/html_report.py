@@ -1,4 +1,4 @@
-"""Self-contained, XSS-safe interactive HTML trace viewer for llm-tape cassettes."""
+"""Self-contained, XSS-safe interactive HTML trace viewer for rhinotape cassettes."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import math
 from collections.abc import Sequence
 from typing import Any
 
-from llm_tape.cassette import Cassette
-from llm_tape.models import Interaction
+from rhinotape.cassette import Cassette
+from rhinotape.models import Interaction
 
 _MAX_SEARCH_CHARS = 2000
 
@@ -188,7 +188,7 @@ def _render_interaction_card(
 def render_html_report(
     cassettes: Sequence[Cassette],
     *,
-    title: str = "llm-tape Trace",
+    title: str = "rhinotape Trace",
     max_body_chars: int = 50000,
 ) -> str:
     """Render one or more cassettes into a self-contained HTML report."""

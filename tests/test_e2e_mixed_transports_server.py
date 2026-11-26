@@ -12,7 +12,7 @@ import httpx
 import pytest
 import requests
 
-from llm_tape import TapeMode, TapeReplayServer, tape
+from rhinotape import TapeMode, TapeReplayServer, tape
 
 
 @pytest.mark.asyncio

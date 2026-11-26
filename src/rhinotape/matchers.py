@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable
 from typing import Any
 from urllib.parse import urlsplit
 
-from llm_tape.models import RecordedRequest
+from rhinotape.models import RecordedRequest
 
 RequestMatcher = Callable[[RecordedRequest, RecordedRequest], bool]
 _MISSING: Any = object()

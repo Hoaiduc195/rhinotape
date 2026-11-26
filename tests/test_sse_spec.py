@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from llm_tape.parsers import parse_sse_events, split_sse_chunks
+from rhinotape.parsers import parse_sse_events, split_sse_chunks
 
 
 def test_parse_sse_whatwg_bom_crlf_comments_and_multiline() -> None:

@@ -8,11 +8,11 @@ from pathlib import Path
 import httpx
 import pytest
 
-import llm_tape.cassette as cassette_mod
-from llm_tape import Cassette, CorruptCassetteError, TapeMode, TapeReplayServer, tape
-from llm_tape.cli import main as cli_main
-from llm_tape.parsers import parse_llm_interaction
-from llm_tape.scrubbing import decode_body_with_encoding, encode_body_with_encoding
+import rhinotape.cassette as cassette_mod
+from rhinotape import Cassette, CorruptCassetteError, TapeMode, TapeReplayServer, tape
+from rhinotape.cli import main as cli_main
+from rhinotape.parsers import parse_llm_interaction
+from rhinotape.scrubbing import decode_body_with_encoding, encode_body_with_encoding
 
 
 def test_oversized_plain_cassette_rejected_before_read(

@@ -10,10 +10,10 @@ from typing import Any
 import pytest
 import requests
 
-from llm_tape import TapeMode, Usage, estimate_cost_usd, tape
-from llm_tape.cli import main as cli_main
-from llm_tape.parsers import parse_llm_interaction
-from llm_tape.requests_adapter import (
+from rhinotape import TapeMode, Usage, estimate_cost_usd, tape
+from rhinotape.cli import main as cli_main
+from rhinotape.parsers import parse_llm_interaction
+from rhinotape.requests_adapter import (
     _extract_body_bytes,
     _RecordingRequestsRaw,
     _ReplayRequestsRaw,
@@ -268,7 +268,7 @@ def test_cli_edge_error_paths(tmp_path: Path, capsys: pytest.CaptureFixture[str]
 def test_thinking_blocks_anthropic_deepseek_gemini_and_redaction(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from llm_tape import Cassette, Interaction, RecordedRequest, RecordedResponse
+    from rhinotape import Cassette, Interaction, RecordedRequest, RecordedResponse
 
     # Anthropic extended thinking JSON & SSE
     anth_json = parse_llm_interaction(

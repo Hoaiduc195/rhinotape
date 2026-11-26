@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from llm_tape.models import RecordedRequest
+from rhinotape.models import RecordedRequest
 
 REDACTED = "[REDACTED]"
 URL_USERINFO_REDACTED = "REDACTED"

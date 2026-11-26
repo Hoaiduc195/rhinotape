@@ -1,13 +1,13 @@
-- id: llm-tape-verify-secrets
-  name: Verify llm-tape cassettes (schema + secrets)
+- id: rhinotape-verify-secrets
+  name: Verify rhinotape cassettes (schema + secrets)
   description: Validate .tape.json(.gz) cassettes and block leaked API keys or tokens.
-  entry: llm-tape verify --check-secrets
+  entry: rhinotape verify --check-secrets
   language: python
   files: \.tape\.json(\.gz)?$
 
-- id: llm-tape-verify-pii
-  name: Verify llm-tape cassettes (schema + secrets + PII)
+- id: rhinotape-verify-pii
+  name: Verify rhinotape cassettes (schema + secrets + PII)
   description: Validate .tape.json(.gz) cassettes and block leaked secrets or PII.
-  entry: llm-tape verify --check-secrets --check-pii
+  entry: rhinotape verify --check-secrets --check-pii
   language: python
   files: \.tape\.json(\.gz)?$

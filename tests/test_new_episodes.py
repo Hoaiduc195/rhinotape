@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 
-from llm_tape import Cassette, TapeMode, TapeTransport, tape
+from rhinotape import Cassette, TapeMode, TapeTransport, tape
 
 
 def test_new_episodes_records_fresh_then_replays_and_appends_only_new(tmp_path: Path) -> None:

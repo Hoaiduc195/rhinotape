@@ -30,15 +30,15 @@ jobs:
           import re
           from pathlib import Path
 
-          text = Path("src/llm_tape/_version.py").read_text(encoding="utf-8")
+          text = Path("src/rhinotape/_version.py").read_text(encoding="utf-8")
           match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
-          assert match is not None, "Could not parse __version__ from src/llm_tape/_version.py"
+          assert match is not None, "Could not parse __version__ from src/rhinotape/_version.py"
           pkg_version = match.group(1)
           tag = os.environ["RELEASE_TAG"]
           normalized_tag = tag[1:] if tag.startswith("v") else tag
           if normalized_tag != pkg_version:
               raise SystemExit(
-                  f"Release tag {tag!r} does not match src/llm_tape/_version.py __version__ ({pkg_version!r})."
+                  f"Release tag {tag!r} does not match src/rhinotape/_version.py __version__ ({pkg_version!r})."
               )
           print(f"Verified release tag {tag} matches __version__ == {pkg_version}")
           PY

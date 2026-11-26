@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 
-from llm_tape import TapeMode, tape
+from rhinotape import TapeMode, tape
 
 
 def test_gemini_and_vertex_generate_and_stream_roundtrip(tmp_path: Path) -> None:

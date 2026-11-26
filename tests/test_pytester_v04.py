@@ -9,7 +9,7 @@ import pytest
 pytest_plugins = ["pytester"]
 
 
-def test_ini_budget_and_llm_tape_dir_and_redact_pii(pytester: pytest.Pytester) -> None:
+def test_ini_budget_and_rhinotape_dir_and_redact_pii(pytester: pytest.Pytester) -> None:
     pytester.makeini(
         """
         [pytest]
@@ -39,8 +39,8 @@ def test_ini_budget_and_llm_tape_dir_and_redact_pii(pytester: pytest.Pytester) -
             )
 
         @pytest.mark.tape(mode="record")
-        def test_pii_and_dir(llm_tape, llm_tape_dir):
-            assert llm_tape.cassette_path.parent == llm_tape_dir
+        def test_pii_and_dir(rhinotape, rhinotape_dir):
+            assert rhinotape.cassette_path.parent == rhinotape_dir
             with httpx.Client(transport=_transport()) as client:
                 r = client.post(
                     "https://api.openai.com/v1/chat/completions",
@@ -69,8 +69,8 @@ def test_env_vars_and_update_stale(
 ) -> None:
     pytester.makeini("[pytest]\nasyncio_default_fixture_loop_scope = function\n")
     custom_dir = pytester.path / "env_tapes"
-    monkeypatch.setenv("LLM_TAPE_DIR", str(custom_dir))
-    monkeypatch.setenv("LLM_TAPE_MODE", "once")
+    monkeypatch.setenv("RHINOTAPE_DIR", str(custom_dir))
+    monkeypatch.setenv("RHINOTAPE_MODE", "once")
 
     pytester.makepyfile(
         """
@@ -92,7 +92,7 @@ def test_env_vars_and_update_stale(
                 )
             return httpx.MockTransport(_handle)
 
-        def test_stale(llm_tape):
+        def test_stale(rhinotape):
             with httpx.Client(transport=_transport()) as client:
                 r = client.post(
                     "https://api.openai.com/v1/chat/completions",
@@ -104,7 +104,7 @@ def test_env_vars_and_update_stale(
                 assert r.status_code == 200
         """
     )
-    # 1st run: records into LLM_TAPE_DIR
+    # 1st run: records into RHINOTAPE_DIR
     r1 = pytester.runpytest()
     r1.assert_outcomes(passed=1)
     cassette_files = list(custom_dir.rglob("*.tape.json"))

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import httpx
 
-from llm_tape import (
+from rhinotape import (
     MemoryCassetteStore,
     TapeMode,
     match_all,

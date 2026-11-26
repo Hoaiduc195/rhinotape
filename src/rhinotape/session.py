@@ -22,11 +22,11 @@ from urllib.parse import urlsplit
 
 import httpx
 
-import llm_tape.cassette as _cassette_mod
-from llm_tape._version import __version__
-from llm_tape.aiohttp_adapter import acquire_aiohttp_patch, release_aiohttp_patch
-from llm_tape.cassette import Cassette
-from llm_tape.models import (
+import rhinotape.cassette as _cassette_mod
+from rhinotape._version import __version__
+from rhinotape.aiohttp_adapter import acquire_aiohttp_patch, release_aiohttp_patch
+from rhinotape.cassette import Cassette
+from rhinotape.models import (
     Interaction,
     RecordedRequest,
     RecordedResponse,
@@ -37,10 +37,10 @@ from llm_tape.models import (
     UnmatchedRequestError,
     Usage,
 )
-from llm_tape.parsers import parse_llm_interaction, redact_stream_chunks
-from llm_tape.pricing import ModelPrice
-from llm_tape.requests_adapter import acquire_requests_patch, release_requests_patch
-from llm_tape.scrubbing import (
+from rhinotape.parsers import parse_llm_interaction, redact_stream_chunks
+from rhinotape.pricing import ModelPrice
+from rhinotape.requests_adapter import acquire_requests_patch, release_requests_patch
+from rhinotape.scrubbing import (
     DEFAULT_MATCH_ON,
     compile_patterns,
     compile_sensitive_headers,
@@ -55,15 +55,15 @@ from llm_tape.scrubbing import (
     scrub_url,
     validate_match_on,
 )
-from llm_tape.stores import CassetteStore
-from llm_tape.urllib_adapter import acquire_urllib_patch, release_urllib_patch
+from rhinotape.stores import CassetteStore
+from rhinotape.urllib_adapter import acquire_urllib_patch, release_urllib_patch
 
 P = ParamSpec("P")
 R = TypeVar("R")
 
 _STRIP_REPLAY_HEADERS = frozenset({"content-encoding", "transfer-encoding", "content-length"})
 _LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
-_HANDLED_EXT_KEY = "_llm_tape_handled"
+_HANDLED_EXT_KEY = "_rhinotape_handled"
 _UNSET: Any = object()
 
 
@@ -145,7 +145,7 @@ def replace_response(
 # --- Global contextvars + ref-counted httpx dispatcher ---------------------
 
 _active_session: contextvars.ContextVar[TapeSession | None] = contextvars.ContextVar(
-    "llm_tape_active_session", default=None
+    "rhinotape_active_session", default=None
 )
 _patch_lock = threading.Lock()
 _patch_refcount = 0
@@ -872,9 +872,9 @@ class TapeSession:
                 else recorded_copy
             )
             merged_meta = (
-                {**existing_meta_copy, **self.metadata, "llm_tape_version": __version__}
+                {**existing_meta_copy, **self.metadata, "rhinotape_version": __version__}
                 if self.mode is TapeMode.NEW_EPISODES
-                else {**self.metadata, "llm_tape_version": __version__}
+                else {**self.metadata, "rhinotape_version": __version__}
             )
             cassette = Cassette(
                 path=self.cassette_path,
@@ -896,9 +896,9 @@ class TapeSession:
             else (recorded_copy if self._is_recording else list(self.interactions))
         )
         merged_meta = (
-            {**existing_meta_copy, **self.metadata, "llm_tape_version": __version__}
+            {**existing_meta_copy, **self.metadata, "rhinotape_version": __version__}
             if self.mode is TapeMode.NEW_EPISODES
-            else {**self.metadata, "llm_tape_version": __version__}
+            else {**self.metadata, "rhinotape_version": __version__}
         )
         cassette = Cassette(path=target, interactions=combined, metadata=merged_meta)
         if path is None and self.store is not None:

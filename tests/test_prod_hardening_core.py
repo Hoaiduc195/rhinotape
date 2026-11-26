@@ -1,4 +1,4 @@
-"""Production hardening unit and integration tests for core llm-tape modules."""
+"""Production hardening unit and integration tests for core rhinotape modules."""
 
 from __future__ import annotations
 
@@ -24,9 +24,9 @@ import pytest
 import requests
 from aiohttp import web
 
-import llm_tape.cassette as cassette_mod
-import llm_tape.session as session_mod
-from llm_tape import (
+import rhinotape.cassette as cassette_mod
+import rhinotape.session as session_mod
+from rhinotape import (
     Cassette,
     CorruptCassetteError,
     TapeAssertionError,
@@ -36,18 +36,18 @@ from llm_tape import (
     TapeSession,
     tape,
 )
-from llm_tape.cassette import cassette_json_schema
-from llm_tape.html_report import render_html_report
-from llm_tape.models import (
+from rhinotape.cassette import cassette_json_schema
+from rhinotape.html_report import render_html_report
+from rhinotape.models import (
     Interaction,
     LLMCallSummary,
     RecordedRequest,
     RecordedResponse,
     Usage,
 )
-from llm_tape.requests_adapter import _ReplayRequestsRaw
-from llm_tape.scrubbing import DEFAULT_SENSITIVE_QUERY_PARAMS, scrub_url
-from llm_tape.session import _StreamContentDecoder
+from rhinotape.requests_adapter import _ReplayRequestsRaw
+from rhinotape.scrubbing import DEFAULT_SENSITIVE_QUERY_PARAMS, scrub_url
+from rhinotape.session import _StreamContentDecoder
 
 # ===========================================================================
 # 1. server.py (TapeReplayServer)
@@ -755,7 +755,7 @@ def test_session_response_scrub_headers_uses_precompiled(
         return real_compile(extra)
 
     monkeypatch.setattr(session_mod, "compile_sensitive_headers", _counting_compile)
-    monkeypatch.setattr("llm_tape.scrubbing.compile_sensitive_headers", _counting_compile)
+    monkeypatch.setattr("rhinotape.scrubbing.compile_sensitive_headers", _counting_compile)
 
     transport = httpx.MockTransport(
         lambda r: httpx.Response(

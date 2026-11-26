@@ -1,4 +1,4 @@
-"""Example: recording and replaying an OpenAI-compatible chat & SSE stream with llm-tape."""
+"""Example: recording and replaying an OpenAI-compatible chat & SSE stream with rhinotape."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import httpx
 
-from llm_tape import tape
+from rhinotape import tape
 
 
 def ask_llm(prompt: str) -> str:

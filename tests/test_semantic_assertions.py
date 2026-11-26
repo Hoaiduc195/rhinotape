@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_tape import TapeAssertionError, TapeMode, TapeTransport, tape
+from rhinotape import TapeAssertionError, TapeMode, TapeTransport, tape
 
 
 def test_semantic_assertions_and_text_thinking_properties(tmp_path: Path) -> None:
