@@ -1,0 +1,39 @@
+name: Bug Report
+description: Report a bug, crash, scrubbing bypass, or unexpected replay mismatch
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue! For security vulnerabilities (secret leaks, XSS, path traversal), please follow `SECURITY.md` instead of opening a public issue.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Clear description of the bug and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal Reproduction
+      description: Minimal offline snippet (e.g. using `httpx.MockTransport` or a sanitized `.tape.json`).
+      render: python
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "e.g. llm-tape 0.3.0, Python 3.12, Ubuntu 24.04, httpx 0.28, pytest 9.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error / Traceback Output
+      render: shell
