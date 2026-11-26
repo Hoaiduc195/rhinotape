@@ -32,7 +32,7 @@ pytest_plugins = ["pytester"]
 
 
 def test_single_source_version() -> None:
-    assert __version__ == "0.3.0"
+    assert __version__ == "0.4.0"
 
 
 def test_cached_input_pricing_and_pricing_file(

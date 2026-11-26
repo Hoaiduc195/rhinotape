@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/Hoaiduc195/llm-tape/master/assets/logo.jpg" alt="rhinotape rhinoceros logo" width="160" />
+<img src="https://raw.githubusercontent.com/Hoaiduc195/rhinotape/master/assets/logo.jpg" alt="rhinotape rhinoceros logo" width="160" />
 
 # rhinotape
 
@@ -8,12 +8,12 @@
 
 Zero API spend in CI · Automatic secret & PII scrubbing · True sync & async SSE streaming · Token, USD cost & tool-call assertions · Single core dependency (`httpx`)
 
-[![CI](https://github.com/Hoaiduc195/llm-tape/actions/workflows/ci.yml/badge.svg)](https://github.com/Hoaiduc195/llm-tape/actions/workflows/ci.yml)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%20|%203.11%20|%203.12%20|%203.13-3776AB?logo=python&logoColor=white)](https://github.com/Hoaiduc195/llm-tape/blob/master/pyproject.toml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg)](https://github.com/Hoaiduc195/llm-tape/blob/master/LICENSE)
-[![Typed: mypy strict](https://img.shields.io/badge/typing-mypy%20strict-38bdf8.svg)](https://github.com/Hoaiduc195/llm-tape/blob/master/pyproject.toml)
+[![CI](https://github.com/Hoaiduc195/rhinotape/actions/workflows/ci.yml/badge.svg)](https://github.com/Hoaiduc195/rhinotape/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%20|%203.11%20|%203.12%20|%203.13-3776AB?logo=python&logoColor=white)](https://github.com/Hoaiduc195/rhinotape/blob/master/pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg)](https://github.com/Hoaiduc195/rhinotape/blob/master/LICENSE)
+[![Typed: mypy strict](https://img.shields.io/badge/typing-mypy%20strict-38bdf8.svg)](https://github.com/Hoaiduc195/rhinotape/blob/master/pyproject.toml)
 [![Code style: Ruff](https://img.shields.io/badge/code%20style-ruff-d7ff64.svg)](https://github.com/astral-sh/ruff)
-[![Dependencies: 1](https://img.shields.io/badge/runtime%20deps-1%20(httpx)-f59e0b.svg)](https://github.com/Hoaiduc195/llm-tape/blob/master/pyproject.toml)
+[![Dependencies: 1](https://img.shields.io/badge/runtime%20deps-1%20(httpx)-f59e0b.svg)](https://github.com/Hoaiduc195/rhinotape/blob/master/pyproject.toml)
 
 [Quickstart](#quickstart) · [Why rhinotape?](#why-rhinotape) · [Framework Integrations](#framework--polyglot-integrations) · [Providers](#supported-providers) · [CLI](#cli-power-tools) · [Contributing](#contributing)
 
@@ -151,7 +151,7 @@ async def fetch_summary(text: str) -> str:
 
 ## Framework & Polyglot Integrations
 
-`rhinotape` drops cleanly into **any** stack with zero extra dependencies — see the complete copy-paste cookbook in **[docs/integrations.md](https://github.com/Hoaiduc195/llm-tape/blob/master/docs/integrations.md)** and runnable demos in **[examples/framework_integrations.py](https://github.com/Hoaiduc195/llm-tape/blob/master/examples/framework_integrations.py)**.
+`rhinotape` drops cleanly into **any** stack with zero extra dependencies — see the complete copy-paste cookbook in **[docs/integrations.md](https://github.com/Hoaiduc195/rhinotape/blob/master/docs/integrations.md)** and runnable demos in **[examples/framework_integrations.py](https://github.com/Hoaiduc195/rhinotape/blob/master/examples/framework_integrations.py)**.
 
 | Stack / Framework | Integration Surface |
 | :--- | :--- |
@@ -243,8 +243,8 @@ Block accidental API key or PII leaks in committed cassettes automatically:
 
 ```yaml
 repos:
-  - repo: https://github.com/Hoaiduc195/llm-tape
-    rev: v0.3.0
+  - repo: https://github.com/Hoaiduc195/rhinotape
+    rev: v0.4.0
     hooks:
       - id: rhinotape-verify-pii
 ```
@@ -255,8 +255,8 @@ repos:
 
 Contributions are warmly welcome! Whether you want to add a new LLM provider parser, improve CLI/reporting UX, add framework cookbooks, or tackle a bug:
 
-1. Browse open [**good first issues**](https://github.com/Hoaiduc195/llm-tape/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) or [**help wanted**](https://github.com/Hoaiduc195/llm-tape/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22) tasks.
-2. Read **[CONTRIBUTING.md](https://github.com/Hoaiduc195/llm-tape/blob/master/CONTRIBUTING.md)** for the codebase map, design principles, and PR checklist.
+1. Browse open [**good first issues**](https://github.com/Hoaiduc195/rhinotape/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) or [**help wanted**](https://github.com/Hoaiduc195/rhinotape/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22) tasks.
+2. Read **[CONTRIBUTING.md](https://github.com/Hoaiduc195/rhinotape/blob/master/CONTRIBUTING.md)** for the codebase map, design principles, and PR checklist.
 3. Run the full offline check suite locally:
 
 ```bash
@@ -271,6 +271,6 @@ uv run pytest -v -W error
 
 ## Security & License
 
-- **Security Policy:** See [SECURITY.md](https://github.com/Hoaiduc195/llm-tape/blob/master/SECURITY.md) for responsible disclosure and built-in scrubbing/decompression guarantees.
-- **Changelog:** See [CHANGELOG.md](https://github.com/Hoaiduc195/llm-tape/blob/master/CHANGELOG.md).
-- **License:** Released under the [MIT License](https://github.com/Hoaiduc195/llm-tape/blob/master/LICENSE).
+- **Security Policy:** See [SECURITY.md](https://github.com/Hoaiduc195/rhinotape/blob/master/SECURITY.md) for responsible disclosure and built-in scrubbing/decompression guarantees.
+- **Changelog:** See [CHANGELOG.md](https://github.com/Hoaiduc195/rhinotape/blob/master/CHANGELOG.md).
+- **License:** Released under the [MIT License](https://github.com/Hoaiduc195/rhinotape/blob/master/LICENSE).

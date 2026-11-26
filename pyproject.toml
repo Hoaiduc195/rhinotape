@@ -31,10 +31,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Hoaiduc195/llm-tape"
-Repository = "https://github.com/Hoaiduc195/llm-tape"
-Issues = "https://github.com/Hoaiduc195/llm-tape/issues"
-Changelog = "https://github.com/Hoaiduc195/llm-tape/blob/master/CHANGELOG.md"
+Homepage = "https://github.com/Hoaiduc195/rhinotape"
+Repository = "https://github.com/Hoaiduc195/rhinotape"
+Issues = "https://github.com/Hoaiduc195/rhinotape/issues"
+Changelog = "https://github.com/Hoaiduc195/rhinotape/blob/master/CHANGELOG.md"
 
 [project.optional-dependencies]
 pytest = ["pytest>=8.0.0"]

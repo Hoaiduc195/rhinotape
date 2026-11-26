@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 - 2026-11-26
+
+### Changed
+- **Renamed package to `rhinotape`** (`pip install rhinotape`, `import rhinotape`, `rhinotape` CLI, `rhinotape` / `rhinotape_dir` pytest fixtures, `RHINOTAPE_*` env vars) with new rhinoceros brand logo and redesigned docs.
+
+### Added
+- **Zero-code CLI wrapper (`rhinotape run`) & `python -m rhinotape`:** Wrap any test runner or app (`npm test`, `vitest`, `go test`, `cargo test`, `pytest`) against an ephemeral local reverse proxy with automatic provider base-URL injection and `--max-cost` / `--max-tokens` / `--strict-unused` CI gates.
+- **Universal Python framework integration layer (`rhinotape.integrations`):** Pure ASGI 3.0 `TapeASGIMiddleware` (FastAPI, Starlette, Litestar, Django ASGI), pure PEP 3333 `TapeWSGIMiddleware` (Flask, Django WSGI, Bottle, Falcon), `TapeConfig.from_env()`, `current_session()` / `require_session()`, `make_httpx_client()` / `make_async_httpx_client()`, `TapeTestCaseMixin`, `activate_tape()` / `activate_from_env()`, and `handle_generic_request()` bridge.
+- **Polyglot reverse-proxy & HTTP control plane (`TapeReplayServer`):** Record/replay proxy modes (`once`, `record`, `new_episodes`), CORS support, PII redaction, and `/__tape__/{health,stats,interactions,reset,load,save,assert}` endpoints.
+
+### Fixed
+- **Production & security hardening:** Bounded request/response sizes (`max_request_bytes` → HTTP 413, upstream `MAX_CASSETTE_BYTES` cap), bounded chunked decoding, request timeouts, thread-safe concurrent saves & `max_interactions` accounting, strict `NaN`/`Infinity`/`bool` validation across cassettes/models/pricing/assertions, expanded secret & base64 verification in `rhinotape verify`, and Python 3.10–3.13 + Windows cross-platform CLI/signal fixes.
+
 ## 0.3.0 - 2026-11-25
 
 ### Added

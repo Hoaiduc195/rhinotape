@@ -1,8 +1,8 @@
 blank_issues_enabled: true
 contact_links:
   - name: Security Vulnerability Report
-    url: https://github.com/Hoaiduc195/llm-tape/security/advisories/new
+    url: https://github.com/Hoaiduc195/rhinotape/security/advisories/new
     about: Report secret-scrubbing bypasses, XSS, or path-traversal issues privately.
   - name: Framework Integration Cookbook
-    url: https://github.com/Hoaiduc195/llm-tape/blob/master/docs/integrations.md
+    url: https://github.com/Hoaiduc195/rhinotape/blob/master/docs/integrations.md
     about: Guides for FastAPI, Flask, Django, LangChain, LlamaIndex, Node.js, Go, and Rust.

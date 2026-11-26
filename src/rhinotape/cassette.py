@@ -28,7 +28,7 @@ def cassette_json_schema() -> dict[str, Any]:
     """Return a Draft 2020-12 JSON Schema describing the .tape.json cassette v2 format."""
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$id": "https://github.com/Hoaiduc195/llm-tape/schemas/cassette-v2.schema.json",
+        "$id": "https://github.com/Hoaiduc195/rhinotape/schemas/cassette-v2.schema.json",
         "title": "rhinotape Cassette",
         "description": "Recorded HTTP & SSE LLM interactions for deterministic offline replay.",
         "type": "object",

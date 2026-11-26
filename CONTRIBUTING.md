@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing to `rhinotape`! We welcome bug fixes, new provider parsers, framework integration guides, CLI improvements, and tests.
 
-Looking for a place to start? Check out our open [**good first issues**](https://github.com/Hoaiduc195/llm-tape/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) and [**help wanted**](https://github.com/Hoaiduc195/llm-tape/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22) issues.
+Looking for a place to start? Check out our open [**good first issues**](https://github.com/Hoaiduc195/rhinotape/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) and [**help wanted**](https://github.com/Hoaiduc195/rhinotape/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22) issues.
 
 ---
 
@@ -34,8 +34,8 @@ Looking for a place to start? Check out our open [**good first issues**](https:/
 `rhinotape` uses [`uv`](https://docs.astral.sh/uv/) for dependency management and targets Python `>=3.10`.
 
 ```bash
-git clone https://github.com/Hoaiduc195/llm-tape.git
-cd llm-tape
+git clone https://github.com/Hoaiduc195/rhinotape.git
+cd rhinotape
 uv sync --extra dev
 ```
 

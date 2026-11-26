@@ -8,7 +8,7 @@ Security fixes are applied to the latest minor release on `master`.
 
 If you discover a security vulnerability (for example, a secret-scrubbing bypass, XSS in HTML trace reports, path-traversal in `FileCassetteStore`, or unbounded decompression), please do **not** open a public issue.
 
-Instead, report it privately via GitHub Security Advisories on `Hoaiduc195/llm-tape` or contact the maintainer directly. Please include:
+Instead, report it privately via GitHub Security Advisories on `Hoaiduc195/rhinotape` or contact the maintainer directly. Please include:
 
 - A description of the vulnerability and its impact.
 - Minimal steps or a proof-of-concept cassette/request to reproduce it.
