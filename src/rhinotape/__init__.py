@@ -43,6 +43,7 @@ from rhinotape.matchers import (
     match_method,
     match_path,
 )
+from rhinotape.mock import CassetteBuilder
 from rhinotape.models import (
     CorruptCassetteError,
     Interaction,
@@ -93,6 +94,7 @@ from rhinotape.transport import AsyncTapeTransport, TapeTransport
 __all__ = [
     "AsyncTapeTransport",
     "Cassette",
+    "CassetteBuilder",
     "CassetteStore",
     "CorruptCassetteError",
     "DEFAULT_MATCH_ON",
