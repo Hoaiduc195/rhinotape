@@ -12,6 +12,14 @@ from rhinotape.chaos import (
     truncate_stream,
 )
 from rhinotape.codegen import generate_pytest_code
+from rhinotape.compare import (
+    CassettePairComparison,
+    MigrationReport,
+    compare_cassettes,
+    evaluate_compare_gates,
+    render_compare_markdown,
+    render_compare_text,
+)
 from rhinotape.graph import render_ascii_graph, render_mermaid_graph
 from rhinotape.html_report import render_html_report
 from rhinotape.integrations import (
@@ -93,6 +101,7 @@ from rhinotape.transport import AsyncTapeTransport, TapeTransport
 __all__ = [
     "AsyncTapeTransport",
     "Cassette",
+    "CassettePairComparison",
     "CassetteStore",
     "CorruptCassetteError",
     "DEFAULT_MATCH_ON",
@@ -108,6 +117,7 @@ __all__ = [
     "MATCH_RELAXED",
     "MATCH_STRICT",
     "MemoryCassetteStore",
+    "MigrationReport",
     "ModelPrice",
     "PII_CREDIT_CARD",
     "PII_EMAIL",
@@ -139,10 +149,12 @@ __all__ = [
     "activate_from_env",
     "activate_tape",
     "chain_replay_hooks",
+    "compare_cassettes",
     "corrupt_json_body",
     "current_session",
     "estimate_cache_savings_usd",
     "estimate_cost_usd",
+    "evaluate_compare_gates",
     "fail_first",
     "fail_nth",
     "generate_pytest_code",
@@ -165,6 +177,8 @@ __all__ = [
     "redact_body",
     "redact_text",
     "render_ascii_graph",
+    "render_compare_markdown",
+    "render_compare_text",
     "render_html_report",
     "render_mermaid_graph",
     "replace_response",
