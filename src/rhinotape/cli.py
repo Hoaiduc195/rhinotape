@@ -1476,11 +1476,11 @@ def _render_otel(cassettes: list[Cassette]) -> str:
         else:
             curr_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
 
-        trace_seed = f"{cassette_name}:{cassette.recorded_at or c_idx}".encode("utf-8")
+        trace_seed = f"{cassette_name}:{cassette.recorded_at or c_idx}".encode()
         trace_id = hashlib.sha256(trace_seed).hexdigest()[:32]
 
         for i_idx, inter in enumerate(cassette.interactions):
-            span_seed = f"{trace_id}:{i_idx}:{inter.request.method}:{inter.request.url}".encode("utf-8")
+            span_seed = f"{trace_id}:{i_idx}:{inter.request.method}:{inter.request.url}".encode()
             span_id = hashlib.sha256(span_seed).hexdigest()[:16]
 
             duration_ns = int(max(inter.latency_ms, 0.0) * 1_000_000)
@@ -1502,11 +1502,19 @@ def _render_otel(cassettes: list[Cassette]) -> str:
                 _otel_attr("cassette.file", cassette_name),
             ]
             if inter.llm.usage.cached_input_tokens > 0:
-                attrs.append(_otel_attr("gen_ai.usage.cached_input_tokens", inter.llm.usage.cached_input_tokens))
+                attrs.append(
+                    _otel_attr(
+                        "gen_ai.usage.cached_input_tokens", inter.llm.usage.cached_input_tokens
+                    )
+                )
             if inter.llm.usage.reasoning_tokens > 0:
-                attrs.append(_otel_attr("gen_ai.usage.reasoning_tokens", inter.llm.usage.reasoning_tokens))
+                attrs.append(
+                    _otel_attr("gen_ai.usage.reasoning_tokens", inter.llm.usage.reasoning_tokens)
+                )
             if inter.llm.estimated_cost_usd > 0.0:
-                attrs.append(_otel_attr("gen_ai.usage.cost_usd", round(inter.llm.estimated_cost_usd, 6)))
+                attrs.append(
+                    _otel_attr("gen_ai.usage.cost_usd", round(inter.llm.estimated_cost_usd, 6))
+                )
 
             events: list[dict[str, Any]] = []
             for tc in inter.llm.tool_calls:
@@ -1520,11 +1528,13 @@ def _render_otel(cassettes: list[Cassette]) -> str:
                         else str(tc.arguments)
                     )
                     tc_attrs.append(_otel_attr("gen_ai.tool.arguments", args_repr))
-                events.append({
-                    "timeUnixNano": start_ns,
-                    "name": "gen_ai.tool.call",
-                    "attributes": tc_attrs,
-                })
+                events.append(
+                    {
+                        "timeUnixNano": start_ns,
+                        "name": "gen_ai.tool.call",
+                        "attributes": tc_attrs,
+                    }
+                )
 
             status = (
                 {"code": 1}
@@ -1532,17 +1542,19 @@ def _render_otel(cassettes: list[Cassette]) -> str:
                 else {"code": 2, "message": f"HTTP {inter.response.status_code}"}
             )
 
-            spans.append({
-                "traceId": trace_id,
-                "spanId": span_id,
-                "name": span_name,
-                "kind": 3,
-                "startTimeUnixNano": start_ns,
-                "endTimeUnixNano": end_ns,
-                "attributes": attrs,
-                "events": events,
-                "status": status,
-            })
+            spans.append(
+                {
+                    "traceId": trace_id,
+                    "spanId": span_id,
+                    "name": span_name,
+                    "kind": 3,
+                    "startTimeUnixNano": start_ns,
+                    "endTimeUnixNano": end_ns,
+                    "attributes": attrs,
+                    "events": events,
+                    "status": status,
+                }
+            )
 
     payload = {
         "resourceSpans": [
