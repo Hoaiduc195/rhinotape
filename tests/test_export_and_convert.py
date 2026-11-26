@@ -319,5 +319,7 @@ def test_cli_export_jsonl(tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert main(["export", str(tapes_dir), "--format", "jsonl", "-o", str(jsonl_out)]) == 0
     assert "Exported jsonl report (2 cassette(s)) to" in capsys.readouterr().out
     assert jsonl_out.exists()
-    disk_lines = [line for line in jsonl_out.read_text(encoding="utf-8").splitlines() if line.strip()]
+    disk_lines = [
+        line for line in jsonl_out.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
     assert len(disk_lines) == 2
