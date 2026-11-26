@@ -103,8 +103,9 @@ def test_urllib_record_replay_sse_and_http_error(tmp_path: Path) -> None:
             # 3. 429 HTTPError
             with pytest.raises(urllib.error.HTTPError) as exc_info:
                 urllib.request.urlopen(f"{base}/v1/err")
-            assert exc_info.value.code == 429
-            assert json.loads(exc_info.value.read().decode()) == {"error": "rate_limited"}
+            with exc_info.value as err:
+                assert err.code == 429
+                assert json.loads(err.read().decode()) == {"error": "rate_limited"}
 
             rec.assert_call_count(3)
             assert rec.total_tokens == 15
@@ -144,8 +145,9 @@ def test_urllib_record_replay_sse_and_http_error(tmp_path: Path) -> None:
 
             with pytest.raises(urllib.error.HTTPError) as exc_info2:
                 urllib.request.urlopen(f"{base}/v1/err")
-            assert exc_info2.value.code == 429
-            assert json.loads(exc_info2.value.read().decode()) == {"error": "rate_limited"}
+            with exc_info2.value as err2:
+                assert err2.code == 429
+                assert json.loads(err2.read().decode()) == {"error": "rate_limited"}
 
             rep.assert_call_count(3)
             rep.assert_no_unused_interactions()
