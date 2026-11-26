@@ -385,8 +385,14 @@ def test_new_assertions_tool_args_unused_and_latency(tmp_path: Path) -> None:
             client.post("https://api.openai.com/v1/chat/completions", json={"step": 1})
             client.post("https://api.openai.com/v1/chat/completions", json={"step": 2})
 
+    from llm_tape.session import replace_response
+
     # Consume only 1 of 2 -> assert_no_unused_interactions fails
-    with tape(cassette_path, mode="replay") as session:
+    with tape(
+        cassette_path,
+        mode="replay",
+        on_replay=lambda inter, _: replace_response(inter, latency_ms=25.0),
+    ) as session:
         with httpx.Client(transport=httpx.MockTransport(handler)) as client:
             client.post("https://api.openai.com/v1/chat/completions", json={"step": 1})
 
@@ -401,7 +407,7 @@ def test_new_assertions_tool_args_unused_and_latency(tmp_path: Path) -> None:
         with pytest.raises(TapeAssertionError, match="unused recorded interaction"):
             session.assert_no_unused_interactions()
         with pytest.raises(TapeAssertionError, match="Latency budget exceeded"):
-            session.assert_max_latency_ms(-1.0)
+            session.assert_max_latency_ms(1.0)
 
 
 def test_cli_redact_and_summary_budget_gates(

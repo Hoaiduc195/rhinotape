@@ -50,6 +50,13 @@ DEFAULT_SENSITIVE_QUERY_PARAMS: frozenset[str] = frozenset(
         "apikey",
         "token",
         "access_token",
+        "secret",
+        "client_secret",
+        "sig",
+        "signature",
+        "x-amz-signature",
+        "x-amz-credential",
+        "x-amz-security-token",
     }
 )
 

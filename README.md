@@ -7,7 +7,8 @@ Works transparently with any SDK built on `httpx` (`openai`, `anthropic`, `googl
 ## Features
 
 - **Record & Replay (`once`, `replay`, `record`, `new_episodes`, `none`):** Record real LLM HTTP & SSE streaming calls into `.tape.json` or deterministic gzip-compressed `.tape.json.gz` cassettes (schema v2, atomic writes, `MAX_CASSETTE_BYTES` safety cap, `content_hash()`), or store them in-memory with `MemoryCassetteStore` / custom `CassetteStore` backends.
-- **Local HTTP Replay Server (`TapeReplayServer` / `llm-tape serve`):** Serve recorded cassettes (including chunked SSE & latency pacing) over localhost with `/__tape__/health` and `/__tape__/stats` so any SDK or non-Python service can replay deterministically.
+- **Universal Framework Integrations (`llm_tape.integrations`, zero extra dependencies):** Plug into **FastAPI / Starlette / Litestar / Django ASGI** (`TapeASGIMiddleware`), **Flask / Django WSGI** (`TapeWSGIMiddleware`), **stdlib `unittest` / Django `TestCase`** (`TapeTestCaseMixin`), **LangChain / LlamaIndex / PydanticAI / OpenAI / Anthropic / Gemini SDKs** (`make_httpx_client`, `make_async_httpx_client`), env-driven config (`TapeConfig.from_env`, `activate_from_env`), context accessors (`current_session`, `require_session`), and custom HTTP libraries (`handle_generic_request`). See [docs/integrations.md](docs/integrations.md).
+- **Polyglot Reverse-Proxy & HTTP Control Plane (`TapeReplayServer` / `llm-tape serve`):** Record or replay cassettes (including SSE streaming, CORS preflight, PII scrubbing, and chunked requests) for **any language or framework** (Node.js/TypeScript, Go, Rust, Playwright, Vitest, Jest, n8n, Dify, curl) via `--upstream` & `--mode`, plus HTTP control endpoints (`/__tape__/health`, `/__tape__/stats`, `/__tape__/reset`, `/__tape__/load`, `/__tape__/save`, `/__tape__/interactions`, `/__tape__/assert`).
 - **Interactive HTML Trace Viewer (`--tape-html-report` / `llm-tape export --format html`):** Self-contained, XSS-safe, zero-CDN HTML report with dark/light mode, KPI cards, latency waterfall bars, thinking/tool-call panels, and live search/provider/status filters.
 - **Chaos & Fault-Injection Toolkit (`chaos.py`):** Composable `on_replay` hooks — `fail_nth()`, `fail_first()`, `inject_latency()`, `corrupt_json_body()`, `truncate_stream()`, `chain_replay_hooks()`, and `replace_response()`.
 - **Automatic Secret & PII Scrubbing:** Redacts API keys, cookies, URL userinfo, `?key=` query params, wildcard headers (`extra_sensitive_headers=["x-secret-*"]`), URL path segments (`redact_url_patterns`), dot-path `redact_fields`, regex `redact_patterns`, and built-in PII presets (`redact_pii=True` or `["email", "phone", "ssn", "credit_card", "ipv4", "jwt"]`).
@@ -120,13 +121,30 @@ llm-tape split combined.tape.json -o split_dir/
 llm-tape convert tests/tapes --to gzip --delete-source
 llm-tape prune tests/tapes --tests-dir tests/ --older-than-days 30
 
-# Export reports (Markdown, CSV, HAR 1.2, interactive HTML, JUnit XML) & serve locally
+# Export reports (Markdown, CSV, HAR 1.2, interactive HTML, JUnit XML) & serve/record locally
 llm-tape export tests/tapes --format html -o trace.html
 llm-tape export tests/tapes --format junit -o junit.xml
 llm-tape serve tests/tapes --port 8787
+llm-tape serve tests/tapes/agent.tape.json --mode once --upstream https://api.openai.com --cors --redact-pii
+llm-tape run tests/tapes/agent.tape.json --mode replay --max-cost 0.05 -- npm test
 ```
 
-### 4. Pre-Commit Hook
+### 4. Any Framework Integration (FastAPI, Flask, Django, LangChain, unittest, Node/Go/Rust)
+
+```python
+from llm_tape import TapeASGIMiddleware, TapeConfig, make_httpx_client, require_session
+
+# ASGI (FastAPI / Starlette / Litestar / Django ASGI)
+app.add_middleware(TapeASGIMiddleware, config=TapeConfig.from_env(), expose_headers=True)
+
+# Or explicit SDK client injection (OpenAI, Anthropic, LangChain, LlamaIndex, PydanticAI)
+with TapeConfig.from_env().session("chat", patch_httpx=False) as session:
+    client = OpenAI(http_client=make_httpx_client(session))
+```
+
+See [docs/integrations.md](docs/integrations.md) and [examples/framework_integrations.py](examples/framework_integrations.py) for complete copy-paste guides across Python web frameworks, agent frameworks, `unittest`, custom HTTP clients, and polyglot HTTP control APIs (`/__tape__/load`, `/__tape__/assert`, etc.).
+
+### 5. Pre-Commit Hook
 
 ```yaml
 repos:

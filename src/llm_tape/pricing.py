@@ -3,16 +3,46 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+_logger = logging.getLogger(__name__)
 _BOUNDARY_CHARS = frozenset({"-", ".", ":", "@"})
 PRICING_FILE_ENV = "LLM_TAPE_PRICING_FILE"
 _pricing_cache_lock = threading.Lock()
 _pricing_file_cache: dict[str, tuple[int, int, dict[str, ModelPrice]]] = {}
+
+
+def _validate_price_rate(field_name: str, value: Any, *, optional: bool = False) -> None:
+    if value is None:
+        if optional:
+            return
+        raise ValueError(f"{field_name} must be a finite non-negative number, got None.")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(
+            f"{field_name} must be a finite non-negative number, got {type(value).__name__}."
+        )
+    fval = float(value)
+    if not math.isfinite(fval) or fval < 0.0:
+        raise ValueError(f"{field_name} must be a finite non-negative number, got {value!r}.")
+
+
+def _parse_json_price_rate(field_name: str, raw: Any, *, optional: bool = False) -> float | None:
+    if raw is None:
+        if optional:
+            return None
+        raise ValueError(f"missing required numeric field {field_name!r}")
+    if isinstance(raw, bool):
+        raise ValueError(f"{field_name!r} must be numeric, not bool")
+    val = float(raw)
+    if not math.isfinite(val) or val < 0.0:
+        raise ValueError(f"{field_name!r} must be a finite non-negative number, got {raw!r}")
+    return val
 
 
 @dataclass(frozen=True)
@@ -23,6 +53,14 @@ class ModelPrice:
     output_per_million: float
     cached_input_per_million: float | None = None
     cache_write_per_million: float | None = None
+
+    def __post_init__(self) -> None:
+        _validate_price_rate("input_per_million", self.input_per_million)
+        _validate_price_rate("output_per_million", self.output_per_million)
+        _validate_price_rate(
+            "cached_input_per_million", self.cached_input_per_million, optional=True
+        )
+        _validate_price_rate("cache_write_per_million", self.cache_write_per_million, optional=True)
 
     def compute(
         self,
@@ -155,11 +193,18 @@ def load_pricing_file(path: str | Path) -> dict[str, ModelPrice]:
         cached = entry.get("cached_input_per_million")
         cache_write = entry.get("cache_write_per_million")
         try:
+            in_rate = _parse_json_price_rate("input_per_million", raw_in)
+            out_rate = _parse_json_price_rate("output_per_million", raw_out)
+            cached_rate = _parse_json_price_rate("cached_input_per_million", cached, optional=True)
+            write_rate = _parse_json_price_rate(
+                "cache_write_per_million", cache_write, optional=True
+            )
+            assert in_rate is not None and out_rate is not None
             table[str(model_name).lower().strip()] = ModelPrice(
-                input_per_million=float(raw_in),
-                output_per_million=float(raw_out),
-                cached_input_per_million=float(cached) if cached is not None else None,
-                cache_write_per_million=float(cache_write) if cache_write is not None else None,
+                input_per_million=in_rate,
+                output_per_million=out_rate,
+                cached_input_per_million=cached_rate,
+                cache_write_per_million=write_rate,
             )
         except (TypeError, ValueError) as exc:
             raise ValueError(f"Invalid numeric price for {model_name!r}: {exc}") from exc
@@ -176,9 +221,11 @@ def _load_env_pricing_cached(env_file: str) -> dict[str, ModelPrice]:
     path = Path(env_file)
     try:
         st = path.stat()
-    except OSError:
+    except OSError as exc:
+        _logger.warning("Failed to access %s (%s): %s", PRICING_FILE_ENV, env_file, exc)
         return {}
     if not path.is_file():
+        _logger.warning("%s path is not a regular file: %s", PRICING_FILE_ENV, env_file)
         return {}
     with _pricing_cache_lock:
         cached = _pricing_file_cache.get(env_file)
@@ -186,7 +233,8 @@ def _load_env_pricing_cached(env_file: str) -> dict[str, ModelPrice]:
             return cached[2]
     try:
         loaded = load_pricing_file(path)
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        _logger.warning("Failed to load %s (%s): %s", PRICING_FILE_ENV, env_file, exc)
         return {}
     with _pricing_cache_lock:
         _pricing_file_cache[env_file] = (st.st_mtime_ns, st.st_size, loaded)

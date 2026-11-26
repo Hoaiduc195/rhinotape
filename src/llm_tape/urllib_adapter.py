@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from llm_tape.models import Interaction, TapeMode
+from llm_tape.parsers import split_sse_chunks
 from llm_tape.scrubbing import encode_body_with_encoding
 
 if TYPE_CHECKING:
@@ -208,7 +209,7 @@ def _dispatched_opener_open(
         body_bytes=body_bytes,
     )
 
-    matched = session._match_replay_or_none(recorded_req)
+    matched, slot_owned = session._match_or_acquire_slot(recorded_req)
     if matched is not None:
         interaction = matched
         delay_s = (
@@ -220,80 +221,87 @@ def _dispatched_opener_open(
             time.sleep(delay_s)
         return _build_replay_urllib_result(url, interaction)
 
-    start = time.perf_counter()
-    token = _in_urllib_open.set(True)
+    slot_for_call = slot_owned
     try:
+        start = time.perf_counter()
+        token = _in_urllib_open.set(True)
         try:
-            resp = orig(opener, fullurl, data=data, timeout=timeout)
-        except urllib.error.HTTPError as err:
-            raw_err = err.read()
             try:
-                err.close()
+                resp = orig(opener, fullurl, data=data, timeout=timeout)
+            except urllib.error.HTTPError as err:
+                raw_err = err.read()
+                try:
+                    err.close()
+                except Exception:
+                    pass
+                latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
+                err_headers = list(err.headers.items()) if err.headers is not None else []
+                slot_owned = False
+                session._record_interaction_parts(
+                    recorded_req=recorded_req,
+                    status_code=int(err.code),
+                    response_headers=err_headers,
+                    response_bytes=raw_err,
+                    latency_ms=latency_ms,
+                    release_slot=slot_for_call,
+                )
+                raise urllib.error.HTTPError(
+                    url=err.url,
+                    code=err.code,
+                    msg=err.msg,
+                    hdrs=err.hdrs,
+                    fp=io.BytesIO(raw_err),
+                ) from None
+        finally:
+            _in_urllib_open.reset(token)
+
+        try:
+            raw_bytes: bytes = resp.read()
+        finally:
+            try:
+                resp.close()
             except Exception:
                 pass
-            latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
-            err_headers = list(err.headers.items()) if err.headers is not None else []
+        latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
+        resp_status = int(getattr(resp, "status", getattr(resp, "code", 200)))
+        resp_headers_dict = dict(resp.headers.items()) if getattr(resp, "headers", None) else {}
+        resp_headers_items = list(resp_headers_dict.items())
+        content_type = str(resp.headers.get("Content-Type", "") if resp.headers else "").lower()
+        is_sse = any(ct in content_type for ct in _SSE_CONTENT_TYPES)
+
+        slot_owned = False
+        if is_sse and resp_status < 400:
+            decoded_text = raw_bytes.decode("utf-8", errors="replace")
+            sse_chunks = split_sse_chunks(decoded_text)
             session._record_interaction_parts(
                 recorded_req=recorded_req,
-                status_code=int(err.code),
-                response_headers=err_headers,
-                response_bytes=raw_err,
+                status_code=resp_status,
+                response_headers=resp_headers_items,
+                response_bytes=None,
                 latency_ms=latency_ms,
+                stream_chunks=sse_chunks,
+                release_slot=slot_for_call,
             )
-            raise urllib.error.HTTPError(
-                url=err.url,
-                code=err.code,
-                msg=err.msg,
-                hdrs=err.hdrs,
-                fp=io.BytesIO(raw_err),
-            ) from None
+        else:
+            session._record_interaction_parts(
+                recorded_req=recorded_req,
+                status_code=resp_status,
+                response_headers=resp_headers_items,
+                response_bytes=raw_bytes,
+                latency_ms=latency_ms,
+                release_slot=slot_for_call,
+            )
+
+        final_url = str(getattr(resp, "url", url))
+        return _ReplayUrllibResponse(
+            url=final_url,
+            status=resp_status,
+            headers=resp_headers_dict,
+            body_bytes=raw_bytes,
+        )
     finally:
-        _in_urllib_open.reset(token)
-
-    raw_bytes: bytes = resp.read()
-    latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
-    resp_status = int(getattr(resp, "status", getattr(resp, "code", 200)))
-    resp_headers_dict = dict(resp.headers.items()) if getattr(resp, "headers", None) else {}
-    resp_headers_items = list(resp_headers_dict.items())
-    content_type = str(resp.headers.get("Content-Type", "") if resp.headers else "").lower()
-    is_sse = any(ct in content_type for ct in _SSE_CONTENT_TYPES)
-
-    if is_sse and resp_status < 400:
-        decoded_text = raw_bytes.decode("utf-8", errors="replace")
-        parts = decoded_text.split("\n\n")
-        sse_chunks = [
-            f"{p}\n\n" if i < len(parts) - 1 else p
-            for i, p in enumerate(parts)
-            if p or i < len(parts) - 1
-        ]
-        session._record_interaction_parts(
-            recorded_req=recorded_req,
-            status_code=resp_status,
-            response_headers=resp_headers_items,
-            response_bytes=None,
-            latency_ms=latency_ms,
-            stream_chunks=sse_chunks,
-        )
-    else:
-        session._record_interaction_parts(
-            recorded_req=recorded_req,
-            status_code=resp_status,
-            response_headers=resp_headers_items,
-            response_bytes=raw_bytes,
-            latency_ms=latency_ms,
-        )
-
-    final_url = str(getattr(resp, "url", url))
-    try:
-        resp.close()
-    except Exception:
-        pass
-    return _ReplayUrllibResponse(
-        url=final_url,
-        status=resp_status,
-        headers=resp_headers_dict,
-        body_bytes=raw_bytes,
-    )
+        if slot_owned:
+            session._release_recording_slot()
 
 
 def acquire_urllib_patch(get_active_session: Callable[[], TapeSession | None]) -> bool:

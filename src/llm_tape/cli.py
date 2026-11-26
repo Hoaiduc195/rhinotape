@@ -12,8 +12,11 @@ import json
 import math
 import os
 import re
+import signal
+import subprocess
 import sys
 import tempfile
+import threading
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,7 +34,7 @@ from llm_tape.models import (
     TapeError,
     ToolCall,
 )
-from llm_tape.parsers import parse_llm_interaction, split_sse_chunks
+from llm_tape.parsers import parse_llm_interaction, redact_stream_chunks
 from llm_tape.pricing import (
     DEFAULT_PRICING,
     PRICING_FILE_ENV,
@@ -40,6 +43,7 @@ from llm_tape.pricing import (
     load_pricing_file,
 )
 from llm_tape.scrubbing import (
+    DEFAULT_MATCH_ON,
     PII_PRESETS,
     compile_patterns,
     fingerprint_request,
@@ -48,6 +52,7 @@ from llm_tape.scrubbing import (
     resolve_pii_patterns,
     scrub_headers,
     scrub_url,
+    validate_match_on,
 )
 
 _BUILTIN_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -70,6 +75,14 @@ _BUILTIN_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     ("slack_token", re.compile(r"(?<![A-Za-z0-9_-])xox[baprs]-[0-9A-Za-z-]{10,}(?![A-Za-z0-9_-])")),
     (
+        "huggingface_token",
+        re.compile(r"(?<![A-Za-z0-9_-])hf_[A-Za-z0-9]{20,}(?![A-Za-z0-9_-])"),
+    ),
+    ("groq_key", re.compile(r"(?<![A-Za-z0-9_-])gsk_[A-Za-z0-9]{20,}(?![A-Za-z0-9_-])")),
+    ("perplexity_key", re.compile(r"(?<![A-Za-z0-9_-])pplx-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])")),
+    ("xai_key", re.compile(r"(?<![A-Za-z0-9_-])xai-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])")),
+    ("pem_private_key", re.compile(r"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")),
+    (
         "bearer_token",
         re.compile(r"(?i)\bBearer\s+(?!\[REDACTED\]|REDACTED|<REDACTED>)[A-Za-z0-9._~+/=-]{16,}"),
     ),
@@ -78,22 +91,24 @@ _BUILTIN_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
+def _validate_non_negative_float(flag: str, value: float | None) -> str | None:
+    if value is not None and (not math.isfinite(value) or value < 0.0):
+        return f"Error: {flag} must be a finite number >= 0."
+    return None
+
+
+def _parse_csv_flags(raw_values: list[str] | None) -> list[str]:
+    result: list[str] = []
+    for item in raw_values or ():
+        for part in item.split(","):
+            cleaned = part.strip()
+            if cleaned:
+                result.append(cleaned)
+    return result
+
+
 def _cassette_stats(cassette: Cassette) -> dict[str, Any]:
-    return {
-        "path": str(cassette.path),
-        "recorded_at": cassette.recorded_at,
-        "calls": len(cassette.interactions),
-        "input_tokens": sum(i.llm.usage.input_tokens for i in cassette.interactions),
-        "cached_input_tokens": sum(i.llm.usage.cached_input_tokens for i in cassette.interactions),
-        "output_tokens": sum(i.llm.usage.output_tokens for i in cassette.interactions),
-        "reasoning_tokens": sum(i.llm.usage.reasoning_tokens for i in cassette.interactions),
-        "total_tokens": sum(i.llm.usage.total_tokens for i in cassette.interactions),
-        "estimated_cost_usd": round(
-            sum(i.llm.estimated_cost_usd for i in cassette.interactions), 8
-        ),
-        "latency_ms": round(sum(i.latency_ms for i in cassette.interactions), 2),
-        "tools": [tc.name for i in cassette.interactions for tc in i.llm.tool_calls],
-    }
+    return cassette.stats()
 
 
 def _cmd_inspect(
@@ -206,6 +221,12 @@ def _cmd_summary(
     max_tokens: int | None = None,
     group_by: str = "file",
 ) -> int:
+    if err := _validate_non_negative_float("--max-cost", max_cost):
+        print(err, file=sys.stderr)
+        return 1
+    if max_tokens is not None and max_tokens < 0:
+        print("Error: --max-tokens must be >= 0.", file=sys.stderr)
+        return 1
     if not directory.exists():
         print(f"Error: directory not found: {directory}", file=sys.stderr)
         return 1
@@ -373,6 +394,20 @@ def _scan_text_for_secrets(
     return hits
 
 
+def _body_to_secret_scan_text(body: Any, encoding: str) -> str:
+    if encoding == "empty" or body is None:
+        return ""
+    if encoding == "base64":
+        if not isinstance(body, str) or not body:
+            return ""
+        try:
+            decoded = base64.b64decode(body, validate=False)
+        except (ValueError, TypeError):
+            return body
+        return decoded.decode("utf-8", errors="ignore")
+    return _body_to_scan_text(body)
+
+
 def _scan_cassette_secrets(
     cassette: Cassette,
     patterns: list[tuple[str, re.Pattern[str]]],
@@ -392,10 +427,12 @@ def _scan_cassette_secrets(
                 findings.extend(
                     _scan_text_for_secrets(v, f"{prefix}.request.headers.{k}", patterns)
                 )
-        if inter.request.body_encoding not in {"base64", "empty"}:
+        if inter.request.body_encoding != "empty":
             findings.extend(
                 _scan_text_for_secrets(
-                    _body_to_scan_text(inter.request.body), f"{prefix}.request.body", patterns
+                    _body_to_secret_scan_text(inter.request.body, inter.request.body_encoding),
+                    f"{prefix}.request.body",
+                    patterns,
                 )
             )
         for k, v in inter.response.headers.items():
@@ -403,10 +440,12 @@ def _scan_cassette_secrets(
                 findings.extend(
                     _scan_text_for_secrets(v, f"{prefix}.response.headers.{k}", patterns)
                 )
-        if inter.response.body_encoding not in {"base64", "empty"}:
+        if inter.response.body_encoding != "empty":
             findings.extend(
                 _scan_text_for_secrets(
-                    _body_to_scan_text(inter.response.body), f"{prefix}.response.body", patterns
+                    _body_to_secret_scan_text(inter.response.body, inter.response.body_encoding),
+                    f"{prefix}.response.body",
+                    patterns,
                 )
             )
         if inter.response.stream_chunks:
@@ -472,6 +511,10 @@ def _cmd_verify(
             if not as_json:
                 print(f"FAIL {file_path}: {exc}", file=sys.stderr)
             continue
+        for issue in cassette.validate():
+            schema_errors.append({"path": str(file_path), "error": issue})
+            if not as_json:
+                print(f"FAIL {file_path}: {issue}", file=sys.stderr)
         if compiled_patterns:
             for hit in _scan_cassette_secrets(cassette, compiled_patterns):
                 entry = {"path": str(file_path), **hit}
@@ -555,6 +598,12 @@ def _cmd_diff(
     show_text_diff: bool = False,
 ) -> int:
     """Compare calls, tokens, cached tokens, cost, latency, and tools between cassettes or dirs."""
+    if err := _validate_non_negative_float("--max-cost-increase", max_cost_increase):
+        print(err, file=sys.stderr)
+        return 1
+    if err := _validate_non_negative_float("--max-cost-increase-pct", max_cost_increase_pct):
+        print(err, file=sys.stderr)
+        return 1
     if not path_a.exists():
         print(f"Error: path not found: {path_a}", file=sys.stderr)
         return 1
@@ -1010,6 +1059,7 @@ def _cmd_redact(
     query_params: list[str],
     fields: list[str],
     patterns: list[str],
+    url_patterns: list[str] | None = None,
     pii: str | None = None,
     dry_run: bool = False,
 ) -> int:
@@ -1023,6 +1073,7 @@ def _cmd_redact(
             resolve_pii_patterns([p.strip() for p in pii.split(",") if p.strip()]) if pii else ()
         )
         effective_patterns = (*compile_patterns(patterns), *pii_patterns)
+        compiled_url_patterns = compile_patterns(url_patterns or ())
     except (ValueError, re.error) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -1037,8 +1088,19 @@ def _cmd_redact(
         cassette = Cassette.load(file_path)
         new_interactions: list[Interaction] = []
         changed = False
+        new_metadata = (
+            redact_body(cassette.metadata, redact_fields=fields, redact_patterns=effective_patterns)
+            if cassette.metadata
+            else cassette.metadata
+        )
+        if new_metadata != cassette.metadata:
+            changed = True
         for inter in cassette.interactions:
-            new_url = scrub_url(inter.request.url, extra_sensitive=query_params)
+            new_url = scrub_url(
+                inter.request.url,
+                extra_sensitive=query_params,
+                redact_url_patterns=compiled_url_patterns,
+            )
             new_req_headers = scrub_headers(inter.request.headers, extra_sensitive=headers)
             new_req_body = (
                 redact_body(
@@ -1071,17 +1133,9 @@ def _cmd_redact(
                 else inter.response.body
             )
             if inter.response.stream_chunks is not None and effective_patterns:
-                per_chunk = [
-                    redact_text(c, effective_patterns) for c in inter.response.stream_chunks
-                ]
-                joined_per_chunk = "".join(per_chunk)
-                joined_redacted = redact_text(
-                    "".join(inter.response.stream_chunks), effective_patterns
+                new_chunks: tuple[str, ...] | None = tuple(
+                    redact_stream_chunks(inter.response.stream_chunks, effective_patterns)
                 )
-                if joined_redacted != joined_per_chunk:
-                    new_chunks: tuple[str, ...] | None = tuple(split_sse_chunks(joined_redacted))
-                else:
-                    new_chunks = tuple(per_chunk)
             else:
                 new_chunks = inter.response.stream_chunks
             new_resp = RecordedResponse(
@@ -1097,7 +1151,7 @@ def _cmd_redact(
                     request_body=new_req.body,
                     response_body=new_resp.body,
                     stream_chunks=new_resp.stream_chunks,
-                    content_type=new_resp.headers.get("content-type", ""),
+                    content_type=_get_header_ci(new_resp.headers, "content-type", ""),
                 )
                 base_text = reparsed.text if reparsed.provider != "unknown" else inter.llm.text
                 base_thinking = (
@@ -1153,6 +1207,8 @@ def _cmd_redact(
             updated += 1
             if not dry_run:
                 cassette.interactions = new_interactions
+                if isinstance(new_metadata, dict):
+                    cassette.metadata = new_metadata
                 cassette.save()
             action = "WOULD UPDATE" if dry_run else "REDACTED"
             print(f"{action}: {file_path}")
@@ -1679,6 +1735,9 @@ def _cmd_search(
     as_json: bool = False,
 ) -> int:
     """Search interactions across all cassettes under a file or directory."""
+    if err := _validate_non_negative_float("--min-cost", min_cost):
+        print(err, file=sys.stderr)
+        return 1
     if not directory.exists():
         print(f"Error: path not found: {directory}", file=sys.stderr)
         return 1
@@ -1689,12 +1748,16 @@ def _cmd_search(
     text_q = text.lower() if text else None
 
     matches: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
     for file_path in files:
+        rel = str(file_path.relative_to(directory)) if directory.is_dir() else file_path.name
         try:
             cassette = Cassette.load(file_path)
-        except CorruptCassetteError:
+        except CorruptCassetteError as exc:
+            errors.append({"path": rel, "error": str(exc)})
+            if not as_json:
+                print(f"Warning: skipping corrupt cassette {rel}: {exc}", file=sys.stderr)
             continue
-        rel = str(file_path.relative_to(directory)) if directory.is_dir() else file_path.name
         for idx, inter in enumerate(cassette.interactions, start=1):
             if model_q and model_q not in (inter.llm.model or "").lower():
                 continue
@@ -1723,7 +1786,7 @@ def _cmd_search(
             )
 
     if as_json:
-        print(json.dumps({"matches": matches, "count": len(matches)}, indent=2))
+        print(json.dumps({"matches": matches, "count": len(matches), "errors": errors}, indent=2))
         return 0
     if not matches:
         print("No matching interactions found.")
@@ -1739,11 +1802,30 @@ def _cmd_search(
     return 0
 
 
-def _cmd_replay_check(target: Path, *, as_json: bool = False) -> int:
+def _cmd_replay_check(
+    target: Path,
+    *,
+    ignore_fields: list[str] | None = None,
+    ignore_query_params: list[str] | None = None,
+    match_on: list[str] | None = None,
+    match_headers: list[str] | None = None,
+    as_json: bool = False,
+) -> int:
     """Verify stored request fingerprints match recomputed fingerprints across cassettes."""
     if not target.exists():
         print(f"Error: path not found: {target}", file=sys.stderr)
         return 1
+    effective_ignore_fields = _parse_csv_flags(ignore_fields)
+    effective_ignore_query_params = _parse_csv_flags(ignore_query_params)
+    effective_match_headers = _parse_csv_flags(match_headers)
+    if match_on:
+        try:
+            effective_match_on = validate_match_on(_parse_csv_flags(match_on))
+        except ValueError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+    else:
+        effective_match_on = DEFAULT_MATCH_ON
     files = [target] if target.is_file() else iter_cassette_files(target)
     if not files:
         if as_json:
@@ -1769,6 +1851,10 @@ def _cmd_replay_check(target: Path, *, as_json: bool = False) -> int:
                 inter.request.url,
                 inter.request.body,
                 headers=inter.request.headers,
+                ignore_fields=effective_ignore_fields,
+                ignore_query_params=effective_ignore_query_params,
+                match_on=effective_match_on,
+                match_headers=effective_match_headers,
             )
             if inter.request.fingerprint != expected_fp:
                 mismatches.append(
@@ -1873,15 +1959,18 @@ def _cmd_list(
 
     files = [directory] if directory.is_file() else iter_cassette_files(directory)
     rows: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
     for file_path in files:
+        rel = str(file_path.relative_to(directory)) if directory.is_dir() else file_path.name
         try:
             cassette = Cassette.load(file_path)
-        except CorruptCassetteError:
+        except CorruptCassetteError as exc:
+            errors.append({"path": rel, "error": str(exc)})
+            if not as_json:
+                print(f"Warning: skipping corrupt cassette {rel}: {exc}", file=sys.stderr)
             continue
         s = _cassette_stats(cassette)
-        s["relative_path"] = (
-            str(file_path.relative_to(directory)) if directory.is_dir() else file_path.name
-        )
+        s["relative_path"] = rel
         rows.append(s)
 
     if sort_by == "name":
@@ -1899,7 +1988,7 @@ def _cmd_list(
         rows = rows[:limit]
 
     if as_json:
-        print(json.dumps({"cassettes": rows, "count": len(rows)}, indent=2))
+        print(json.dumps({"cassettes": rows, "count": len(rows), "errors": errors}, indent=2))
         return 0
     if not rows:
         print(f"No .tape.json cassettes found in {directory}")
@@ -1989,45 +2078,228 @@ def _cmd_split(
     return 0
 
 
+def _build_cli_replay_server(
+    source: Path,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8787,
+    mode: str = "replay",
+    upstream: str | None = None,
+    enable_cors: bool = False,
+    max_request_bytes: int = 10 * 1024 * 1024,
+    redact_pii: str | None = None,
+    allow_repeats: bool = True,
+    latency_scale: float = 0.0,
+    ignore_fields: list[str] | None = None,
+    match_on: list[str] | None = None,
+    auto_save: bool = True,
+) -> Any:
+    from llm_tape.models import TapeMode
+    from llm_tape.server import TapeReplayServer
+
+    coerced_mode = TapeMode.coerce(mode)
+    if coerced_mode is TapeMode.REPLAY and not source.exists():
+        raise FileNotFoundError(f"path not found: {source}")
+
+    effective_ignore_fields = _parse_csv_flags(ignore_fields)
+    effective_match_on = (
+        validate_match_on(_parse_csv_flags(match_on)) if match_on else ("method", "path", "body")
+    )
+
+    effective_pii: bool | list[str]
+    if redact_pii is None:
+        effective_pii = False
+    else:
+        parsed_pii = [p.strip() for p in redact_pii.split(",") if p.strip()]
+        effective_pii = parsed_pii if parsed_pii else True
+
+    return TapeReplayServer(
+        source,
+        host=host,
+        port=port,
+        mode=coerced_mode,
+        upstream_url=upstream,
+        enable_cors=enable_cors,
+        max_request_bytes=max_request_bytes,
+        redact_pii=effective_pii,
+        allow_playback_repeats=allow_repeats,
+        ignore_fields=effective_ignore_fields,
+        match_on=effective_match_on,
+        replay_latency_scale=latency_scale,
+        auto_save=auto_save,
+    )
+
+
 def _cmd_serve(
     source: Path,
     *,
     host: str = "127.0.0.1",
     port: int = 8787,
+    mode: str = "replay",
+    upstream: str | None = None,
+    enable_cors: bool = False,
+    max_request_bytes: int = 10 * 1024 * 1024,
+    redact_pii: str | None = None,
     allow_repeats: bool = True,
     latency_scale: float = 0.0,
+    ignore_fields: list[str] | None = None,
+    match_on: list[str] | None = None,
 ) -> int:
-    """Start a local HTTP replay server serving recorded cassette interaction(s)."""
-    from llm_tape.server import TapeReplayServer
-
-    if not source.exists():
-        print(f"Error: path not found: {source}", file=sys.stderr)
-        return 1
+    """Start a local HTTP replay/reverse-proxy server serving cassette interaction(s)."""
     try:
-        server = TapeReplayServer(
+        server = _build_cli_replay_server(
             source,
             host=host,
             port=port,
-            allow_playback_repeats=allow_repeats,
-            replay_latency_scale=latency_scale,
+            mode=mode,
+            upstream=upstream,
+            enable_cors=enable_cors,
+            max_request_bytes=max_request_bytes,
+            redact_pii=redact_pii,
+            allow_repeats=allow_repeats,
+            latency_scale=latency_scale,
+            ignore_fields=ignore_fields,
+            match_on=match_on,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    stop_event = threading.Event()
+    prev_sigterm: Any = None
+    sigterm_installed = False
+
+    def _handle_sigterm(signum: int, frame: Any) -> None:
+        del signum, frame
+        stop_event.set()
+
+    if hasattr(signal, "SIGTERM") and threading.current_thread() is threading.main_thread():
+        prev_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+        sigterm_installed = True
+
+    server.start()
+    st = server.stats()
+    print(f"Serving {st['loaded_interactions']} interaction(s) at {server.url} (Ctrl+C to stop)...")
+    try:
+        while not stop_event.wait(timeout=0.5):
+            pass
+        print("\nStopping llm-tape replay server.")
+    except KeyboardInterrupt:
+        print("\nStopping llm-tape replay server.")
+    finally:
+        if sigterm_installed:
+            signal.signal(signal.SIGTERM, prev_sigterm)
+        server.stop()
+    return 0
+
+
+def _cmd_run(
+    source: Path,
+    command: list[str],
+    *,
+    mode: str = "replay",
+    upstream: str | None = None,
+    enable_cors: bool = False,
+    redact_pii: str | None = None,
+    allow_repeats: bool = True,
+    latency_scale: float = 0.0,
+    ignore_fields: list[str] | None = None,
+    match_on: list[str] | None = None,
+    max_cost: float | None = None,
+    max_tokens: int | None = None,
+    strict_unused: bool = False,
+    save_on_error: bool = False,
+    inject_env: bool = True,
+    quiet: bool = False,
+) -> int:
+    """Run any command against an ephemeral local TapeReplayServer with zero code changes."""
+    from llm_tape.models import TapeMode
+
+    cmd = list(command)
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    if not cmd:
+        print("Error: specify a command to run after `--`.", file=sys.stderr)
+        return 2
+    if err := _validate_non_negative_float("--max-cost", max_cost):
+        print(err, file=sys.stderr)
+        return 1
+    if max_tokens is not None and max_tokens < 0:
+        print("Error: --max-tokens must be >= 0.", file=sys.stderr)
+        return 1
+
+    try:
+        server = _build_cli_replay_server(
+            source,
+            host="127.0.0.1",
+            port=0,
+            mode=mode,
+            upstream=upstream,
+            enable_cors=enable_cors,
+            redact_pii=redact_pii,
+            allow_repeats=allow_repeats,
+            latency_scale=latency_scale,
+            ignore_fields=ignore_fields,
+            match_on=match_on,
+            auto_save=False,
         )
     except (ValueError, FileNotFoundError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     server.start()
-    st = server.stats()
-    print(f"Serving {st['loaded_interactions']} interaction(s) at {server.url} (Ctrl+C to stop)...")
     try:
-        import time
+        env = dict(os.environ)
+        env["LLM_TAPE_URL"] = server.url
+        if inject_env:
+            env["OPENAI_BASE_URL"] = f"{server.url}/v1"
+            env["ANTHROPIC_BASE_URL"] = server.url
+            env["GOOGLE_GEMINI_BASE_URL"] = server.url
+            env["OLLAMA_HOST"] = server.url
+            if server.mode is TapeMode.REPLAY:
+                env.setdefault("OPENAI_API_KEY", "llm-tape-replay")
+                env.setdefault("ANTHROPIC_API_KEY", "llm-tape-replay")
+                env.setdefault("GEMINI_API_KEY", "llm-tape-replay")
+        try:
+            proc = subprocess.run(cmd, env=env, check=False)
+        except OSError as exc:
+            print(f"Error: failed to launch command {cmd[0]!r}: {exc}", file=sys.stderr)
+            return 1
 
-        while True:
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        print("\nStopping llm-tape replay server.")
+        if (proc.returncode == 0 or save_on_error) and server._dirty:
+            if server._active_cassette_path is not None:
+                server.save_cassette()
+
+        spec: dict[str, Any] = {}
+        if max_cost is not None:
+            spec["max_cost_usd"] = max_cost
+        if max_tokens is not None:
+            spec["max_tokens"] = max_tokens
+        if strict_unused:
+            spec["no_unused_interactions"] = True
+
+        st = server.stats()
+        if not quiet:
+            calls = int(st["served_requests"]) + int(st["recorded_interactions"])
+            print(
+                f"[llm-tape run] calls={calls} tokens={st['total_tokens']} "
+                f"cost=${st['estimated_cost_usd']:.6f}",
+                file=sys.stderr,
+            )
+
+        if proc.returncode != 0:
+            return int(proc.returncode)
+
+        if spec:
+            code, res = server.evaluate_assertions(spec)
+            if code != 200:
+                for msg in res.get("failures", []):
+                    print(f"[llm-tape run] FAILED: {msg}", file=sys.stderr)
+                return 1
+        return 0
     finally:
         server.stop()
-    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2221,6 +2493,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Regex pattern to redact in bodies and stream chunks (repeatable).",
     )
     p_redact.add_argument(
+        "--url-pattern",
+        action="append",
+        default=[],
+        dest="url_patterns",
+        help="Regex pattern to redact in request URL paths (repeatable).",
+    )
+    p_redact.add_argument(
         "--pii",
         nargs="?",
         const="all",
@@ -2363,13 +2642,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write split cassettes as .tape.json.gz.",
     )
 
+    from llm_tape.models import TapeMode
+
     p_serve = sub.add_parser(
         "serve",
-        help="Start a local HTTP replay server backed by a cassette file or directory.",
+        help="Start a local HTTP replay/reverse-proxy server backed by a cassette or directory.",
     )
     p_serve.add_argument("source", type=Path, help="Cassette file or directory to serve.")
     p_serve.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1).")
     p_serve.add_argument("--port", type=int, default=8787, help="Bind port (default: 8787).")
+    p_serve.add_argument(
+        "--mode",
+        choices=[m.value for m in TapeMode if m != TapeMode.NONE],
+        default="replay",
+        help="Server mode: replay (default), once, record, or new_episodes.",
+    )
+    p_serve.add_argument(
+        "--upstream",
+        default=None,
+        help="Upstream base URL (e.g. https://api.openai.com) for reverse-proxy recording.",
+    )
+    p_serve.add_argument(
+        "--cors",
+        action="store_true",
+        help="Enable permissive CORS headers and 204 OPTIONS preflight responses.",
+    )
+    p_serve.add_argument(
+        "--max-request-bytes",
+        type=int,
+        default=10 * 1024 * 1024,
+        help="Maximum incoming request body size in bytes (default: 10485760).",
+    )
+    p_serve.add_argument(
+        "--redact-pii",
+        nargs="?",
+        const="all",
+        default=None,
+        help=(
+            "Redact built-in PII presets when recording (omit value for all, or comma-separated: "
+            "email,phone,ssn,credit_card,ipv4,jwt)."
+        ),
+    )
     p_serve.add_argument(
         "--no-repeats",
         action="store_true",
@@ -2381,6 +2694,70 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Scale factor for replaying recorded latencies (default: 0.0).",
     )
+    p_serve.add_argument(
+        "--ignore-fields",
+        action="append",
+        default=[],
+        dest="ignore_fields",
+        help=(
+            "JSON dot-path field(s) to ignore when matching requests "
+            "(repeatable or comma-separated)."
+        ),
+    )
+    p_serve.add_argument(
+        "--match-on",
+        action="append",
+        default=[],
+        dest="match_on",
+        help="Request matching keys (repeatable or comma-separated; default: method,path,body).",
+    )
+
+    p_run = sub.add_parser(
+        "run",
+        help="Run any command against an ephemeral local TapeReplayServer (zero code changes).",
+    )
+    p_run.add_argument("source", type=Path, help="Cassette file or directory.")
+    p_run.add_argument(
+        "--mode",
+        choices=[m.value for m in TapeMode if m != TapeMode.NONE],
+        default="replay",
+        help="Server mode: replay (default), once, record, or new_episodes.",
+    )
+    p_run.add_argument("--upstream", default=None, help="Upstream base URL for recording.")
+    p_run.add_argument("--cors", action="store_true", help="Enable CORS headers and preflight.")
+    p_run.add_argument(
+        "--redact-pii",
+        nargs="?",
+        const="all",
+        default=None,
+        help="Redact built-in PII presets when recording.",
+    )
+    p_run.add_argument(
+        "--no-repeats", action="store_true", help="Consume each recorded interaction only once."
+    )
+    p_run.add_argument(
+        "--latency-scale",
+        type=float,
+        default=0.0,
+        help="Scale factor for replaying recorded latencies.",
+    )
+    p_run.add_argument("--ignore-fields", action="append", default=[], dest="ignore_fields")
+    p_run.add_argument("--match-on", action="append", default=[], dest="match_on")
+    p_run.add_argument("--max-cost", type=float, default=None, help="Fail if cost exceeds USD.")
+    p_run.add_argument("--max-tokens", type=int, default=None, help="Fail if tokens exceed limit.")
+    p_run.add_argument(
+        "--strict-unused", action="store_true", help="Fail if any recorded interactions go unused."
+    )
+    p_run.add_argument(
+        "--save-on-error", action="store_true", help="Save cassette even if child command fails."
+    )
+    p_run.add_argument(
+        "--no-inject-env",
+        action="store_true",
+        help="Only set LLM_TAPE_URL; do not override provider *_BASE_URL env vars.",
+    )
+    p_run.add_argument("--quiet", action="store_true", help="Suppress summary line on stderr.")
+    p_run.add_argument("cmd", nargs="*", help="Command to execute after `--`.")
 
     p_pricing = sub.add_parser(
         "pricing",
@@ -2412,6 +2789,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Verify stored request fingerprints match recomputed fingerprints.",
     )
     p_rcheck.add_argument("target", type=Path, nargs="?", default=Path("."))
+    p_rcheck.add_argument(
+        "--ignore-fields",
+        action="append",
+        default=[],
+        dest="ignore_fields",
+        help="JSON dot-path field(s) ignored during recording (repeatable or comma-separated).",
+    )
+    p_rcheck.add_argument(
+        "--ignore-query-params",
+        action="append",
+        default=[],
+        dest="ignore_query_params",
+        help="Query parameter(s) ignored during recording (repeatable or comma-separated).",
+    )
+    p_rcheck.add_argument(
+        "--match-on",
+        action="append",
+        default=[],
+        dest="match_on",
+        help="Request matching keys used during recording (repeatable or comma-separated).",
+    )
+    p_rcheck.add_argument(
+        "--match-headers",
+        action="append",
+        default=[],
+        dest="match_headers",
+        help=(
+            "Header name(s) included in matching during recording (repeatable or comma-separated)."
+        ),
+    )
     p_rcheck.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
 
     p_reparse = sub.add_parser(
@@ -2496,6 +2903,7 @@ def main(argv: list[str] | None = None) -> int:
                 query_params=args.query_params,
                 fields=args.fields,
                 patterns=args.patterns,
+                url_patterns=args.url_patterns,
                 pii=args.pii,
                 dry_run=args.dry_run,
             )
@@ -2522,8 +2930,34 @@ def main(argv: list[str] | None = None) -> int:
                 args.source,
                 host=args.host,
                 port=args.port,
+                mode=args.mode,
+                upstream=args.upstream,
+                enable_cors=args.cors,
+                max_request_bytes=args.max_request_bytes,
+                redact_pii=args.redact_pii,
                 allow_repeats=not args.no_repeats,
                 latency_scale=args.latency_scale,
+                ignore_fields=args.ignore_fields,
+                match_on=args.match_on,
+            )
+        if args.command == "run":
+            return _cmd_run(
+                args.source,
+                args.cmd,
+                mode=args.mode,
+                upstream=args.upstream,
+                enable_cors=args.cors,
+                redact_pii=args.redact_pii,
+                allow_repeats=not args.no_repeats,
+                latency_scale=args.latency_scale,
+                ignore_fields=args.ignore_fields,
+                match_on=args.match_on,
+                max_cost=args.max_cost,
+                max_tokens=args.max_tokens,
+                strict_unused=args.strict_unused,
+                save_on_error=args.save_on_error,
+                inject_env=not args.no_inject_env,
+                quiet=args.quiet,
             )
         if args.command == "pricing":
             return _cmd_pricing(prefix=args.prefix, as_json=args.as_json)
@@ -2539,7 +2973,14 @@ def main(argv: list[str] | None = None) -> int:
                 as_json=args.as_json,
             )
         if args.command == "replay-check":
-            return _cmd_replay_check(args.target, as_json=args.as_json)
+            return _cmd_replay_check(
+                args.target,
+                ignore_fields=args.ignore_fields,
+                ignore_query_params=args.ignore_query_params,
+                match_on=args.match_on,
+                match_headers=args.match_headers,
+                as_json=args.as_json,
+            )
         if args.command == "reparse":
             return _cmd_reparse(args.target, dry_run=args.dry_run)
         if args.command == "list":

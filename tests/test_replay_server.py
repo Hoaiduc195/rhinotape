@@ -61,7 +61,7 @@ def test_tape_replay_server_json_sse_health_stats_and_clients(tmp_path: Path) ->
 
     with TapeReplayServer(tapes_dir, replay_latency_scale=0.1) as srv:
         # Health & stats endpoints
-        assert httpx.get(f"{srv.url}/__tape__/health").json() == {"status": "ok"}
+        assert httpx.get(f"{srv.url}/__tape__/health").json()["status"] == "ok"
 
         # Replay via httpx
         r1 = httpx.post(

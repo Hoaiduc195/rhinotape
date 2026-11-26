@@ -8,7 +8,7 @@ import math
 import os
 import re
 import tempfile
-from collections.abc import Generator
+from collections.abc import Generator, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -25,6 +25,54 @@ _MAX_STEM_LEN = 120
 _FAILED_ATTR = "_llm_tape_call_failed"
 _REPORT_KEY: pytest.StashKey[list[dict[str, Any]]] = pytest.StashKey()
 _VIOLATIONS_KEY: pytest.StashKey[list[str]] = pytest.StashKey()
+_VALID_TAPE_MARKER_KWARGS: frozenset[str] = frozenset(
+    {
+        "name",
+        "mode",
+        "compress",
+        "strict_unused",
+        "custom_pricing",
+        "extra_sensitive_headers",
+        "extra_sensitive_query_params",
+        "ignore_localhost",
+        "ignore_hosts",
+        "ignore_request",
+        "ignore_fields",
+        "ignore_query_params",
+        "ignore_json_array_order",
+        "redact_fields",
+        "redact_patterns",
+        "redact_pii",
+        "redact_url_patterns",
+        "scrub_body",
+        "match_on",
+        "match_headers",
+        "custom_matcher",
+        "on_replay",
+        "on_record",
+        "metadata",
+        "store",
+        "max_interactions",
+        "max_cost_usd",
+        "replay_latency_scale",
+        "allow_playback_repeats",
+        "save_on_error",
+        "patch_httpx",
+        "patch_requests",
+        "patch_aiohttp",
+        "patch_urllib",
+    }
+)
+
+
+def _validate_tape_marker_kwargs(marker_kwargs: Mapping[str, Any]) -> None:
+    unknown = sorted(set(marker_kwargs) - _VALID_TAPE_MARKER_KWARGS)
+    if unknown:
+        opts = ", ".join(repr(k) for k in unknown)
+        raise pytest.UsageError(
+            f"Unknown @pytest.mark.tape(...) option(s): {opts}. "
+            f"Supported options: {', '.join(sorted(_VALID_TAPE_MARKER_KWARGS))}"
+        )
 
 
 def _sanitize_segment(name: str, *, unique_seed: str | None = None) -> str:
@@ -45,7 +93,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         action="store",
         default=None,
         choices=[m.value for m in TapeMode],
-        help="Tape recording mode: once (default), replay, record, or none.",
+        help="Tape recording mode: once (default), replay, record, new_episodes, or none.",
     )
     group.addoption(
         "--tape-dir",
@@ -107,7 +155,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 
     parser.addini(
         "tape_mode",
-        help="Default llm-tape mode (once, replay, record, none).",
+        help="Default llm-tape mode (once, replay, record, new_episodes, none).",
         default=TapeMode.ONCE.value,
     )
     parser.addini(
@@ -221,15 +269,34 @@ def pytest_configure(config: pytest.Config) -> None:
 
     config.addinivalue_line(
         "markers",
-        "tape(name=None, mode=None, compress=None, ignore_localhost=None, ignore_hosts=(), "
-        "ignore_fields=(), ignore_query_params=(), redact_fields=(), redact_patterns=(), "
-        "scrub_body=None, match_on=None, custom_matcher=None, replay_latency_scale=0.0, "
-        "allow_playback_repeats=False, save_on_error=False, patch_requests=True): "
+        "tape(name=None, mode=None, compress=None, strict_unused=None, "
+        "custom_pricing=None, extra_sensitive_headers=(), extra_sensitive_query_params=(), "
+        "ignore_localhost=None, ignore_hosts=(), ignore_request=None, "
+        "ignore_fields=(), ignore_query_params=(), ignore_json_array_order=(), "
+        "redact_fields=(), redact_patterns=(), redact_pii=False, redact_url_patterns=(), "
+        "scrub_body=None, match_on=None, match_headers=(), custom_matcher=None, "
+        "on_replay=None, on_record=None, metadata=None, store=None, "
+        "max_interactions=None, max_cost_usd=None, replay_latency_scale=0.0, "
+        "allow_playback_repeats=False, save_on_error=False, patch_httpx=True, "
+        "patch_requests=True, patch_aiohttp=True, patch_urllib=False): "
         "configure cassette options for the llm_tape fixture.",
     )
 
 
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    del config
+    for item in items:
+        for marker in item.iter_markers(name="tape"):
+            _validate_tape_marker_kwargs(marker.kwargs)
+
+
 def _compute_report_totals(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    raw_cost = sum(float(e["estimated_cost_usd"]) for e in entries)
+    est_cost = round(raw_cost, 8) if math.isfinite(raw_cost) else raw_cost
+    raw_savings = sum(float(e.get("cache_savings_usd", 0.0)) for e in entries)
+    cache_savings = round(raw_savings, 8) if math.isfinite(raw_savings) else raw_savings
+    raw_latency = sum(float(e["latency_ms"]) for e in entries)
+    latency_ms = round(raw_latency, 2) if math.isfinite(raw_latency) else raw_latency
     return {
         "tests": len(entries),
         "calls": sum(int(e["calls"]) for e in entries),
@@ -237,15 +304,14 @@ def _compute_report_totals(entries: list[dict[str, Any]]) -> dict[str, Any]:
         "cached_input_tokens": sum(int(e["cached_input_tokens"]) for e in entries),
         "output_tokens": sum(int(e["output_tokens"]) for e in entries),
         "total_tokens": sum(int(e["total_tokens"]) for e in entries),
-        "estimated_cost_usd": round(sum(float(e["estimated_cost_usd"]) for e in entries), 8),
-        "cache_savings_usd": round(sum(float(e.get("cache_savings_usd", 0.0)) for e in entries), 8),
-        "latency_ms": round(sum(float(e["latency_ms"]) for e in entries), 2),
+        "estimated_cost_usd": est_cost,
+        "cache_savings_usd": cache_savings,
+        "latency_ms": latency_ms,
     }
 
 
-def _write_json_report_atomic(path: Path, payload: dict[str, Any]) -> None:
+def _write_bytes_atomic(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     tmp_path: str | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -267,6 +333,11 @@ def _write_json_report_atomic(path: Path, payload: dict[str, Any]) -> None:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+
+
+def _write_json_report_atomic(path: Path, payload: dict[str, Any]) -> None:
+    data = (json.dumps(payload, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    _write_bytes_atomic(path, data)
 
 
 @pytest.hookimpl(optionalhook=True)
@@ -305,11 +376,16 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         violations.append(
             f"LLM token budget exceeded: {totals['total_tokens']} > --tape-max-tokens {max_tokens}"
         )
-    if max_cost is not None and round(float(totals["estimated_cost_usd"]), 8) > max_cost:
-        violations.append(
-            f"LLM cost budget exceeded: ${totals['estimated_cost_usd']:.6f} "
-            f"> --tape-max-cost ${max_cost:.6f}"
-        )
+    if max_cost is not None:
+        total_cost = float(totals["estimated_cost_usd"])
+        if not math.isfinite(total_cost):
+            violations.append(
+                f"LLM cost budget check failed: non-finite total cost ({total_cost!r})"
+            )
+        elif round(total_cost, 8) > max_cost:
+            violations.append(
+                f"LLM cost budget exceeded: ${total_cost:.6f} > --tape-max-cost ${max_cost:.6f}"
+            )
 
     session.config.stash[_VIOLATIONS_KEY] = violations
     if violations and session.exitstatus == pytest.ExitCode.OK:
@@ -345,29 +421,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
                 except Exception:
                     continue
         html_text = render_html_report(cassettes, title="pytest llm-tape Report")
-        out_path = Path(str(html_report_path))
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path: str | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="wb",
-                dir=out_path.parent,
-                prefix=f".{out_path.stem}.",
-                suffix=".tmp",
-                delete=False,
-            ) as tmp:
-                tmp_path = tmp.name
-                tmp.write(html_text.encode("utf-8"))
-                tmp.flush()
-                os.fsync(tmp.fileno())
-            os.replace(tmp_path, out_path)
-            tmp_path = None
-        finally:
-            if tmp_path is not None:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+        _write_bytes_atomic(Path(str(html_report_path)), html_text.encode("utf-8"))
 
 
 def pytest_terminal_summary(
@@ -503,6 +557,7 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
 
     marker = request.node.get_closest_marker("tape")
     marker_kwargs = marker.kwargs if marker else {}
+    _validate_tape_marker_kwargs(marker_kwargs)
     marker_name = marker_kwargs.get("name")
     marker_mode = marker_kwargs.get("mode")
 
@@ -559,8 +614,12 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
     session = TapeSession(
         cassette_path,
         mode=mode,
+        custom_pricing=marker_kwargs.get("custom_pricing"),
+        extra_sensitive_headers=marker_kwargs.get("extra_sensitive_headers", ()),
+        extra_sensitive_query_params=marker_kwargs.get("extra_sensitive_query_params", ()),
         ignore_localhost=ignore_localhost,
         ignore_hosts=ignore_hosts,
+        ignore_request=marker_kwargs.get("ignore_request"),
         ignore_fields=ignore_fields,
         ignore_query_params=ignore_query_params,
         ignore_json_array_order=marker_kwargs.get("ignore_json_array_order", ()),
@@ -575,11 +634,13 @@ def llm_tape(request: pytest.FixtureRequest) -> Generator[TapeSession, None, Non
         on_replay=marker_kwargs.get("on_replay"),
         on_record=marker_kwargs.get("on_record"),
         metadata=marker_kwargs.get("metadata"),
+        store=marker_kwargs.get("store"),
         max_interactions=marker_kwargs.get("max_interactions"),
         max_cost_usd=marker_kwargs.get("max_cost_usd"),
         replay_latency_scale=float(marker_kwargs.get("replay_latency_scale", 0.0)),
         allow_playback_repeats=bool(marker_kwargs.get("allow_playback_repeats", False)),
         save_on_error=bool(marker_kwargs.get("save_on_error", False)),
+        patch_httpx=bool(marker_kwargs.get("patch_httpx", True)),
         patch_requests=bool(marker_kwargs.get("patch_requests", True)),
         patch_aiohttp=bool(marker_kwargs.get("patch_aiohttp", True)),
         patch_urllib=bool(marker_kwargs.get("patch_urllib", False)),

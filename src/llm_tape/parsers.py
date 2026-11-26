@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Sequence
 from typing import Any
@@ -10,6 +11,7 @@ from urllib.parse import urlsplit
 
 from llm_tape.models import LLMCallSummary, ToolCall, Usage
 from llm_tape.pricing import ModelPrice, estimate_cost_usd
+from llm_tape.scrubbing import redact_text
 
 _GEMINI_MODEL_RE = re.compile(r"/models/([^/:?]+)")
 _AZURE_DEPLOYMENT_RE = re.compile(r"/openai/deployments/([^/?]+)")
@@ -53,6 +55,47 @@ _ANTHROPIC_SSE_TYPES: frozenset[str] = frozenset({"message_start", "content_bloc
 _COHERE_SSE_EVENTS: frozenset[str] = frozenset({"content-delta", "message-end", "tool-call-start"})
 
 
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    if value is None or isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if math.isfinite(value) else default
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
+def _extract_model_name(*candidates: Any) -> str | None:
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate:
+            return candidate
+    return None
+
+
+def _as_optional_str(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return None
+
+
 def _parse_json_args(raw: Any) -> dict[str, Any] | str:
     if isinstance(raw, dict):
         return raw
@@ -74,19 +117,24 @@ def _detect_provider(
     sse_events: Sequence[tuple[str | None, Any]] = (),
 ) -> str:
     lower_url = url.lower()
+    lower_path = urlsplit(lower_url).path
     if "anthropic.com" in lower_url:
         return "anthropic"
-    if any(tok in lower_url for tok in _GEMINI_URL_TOKENS):
-        return "gemini"
-    if "/converse" in lower_url and ("bedrock" in lower_url or "/model/" in lower_url):
-        return "bedrock"
-    if "/api/" in lower_url and urlsplit(lower_url).path.rstrip("/").endswith(
-        _OLLAMA_PATH_SUFFIXES
+    if any(
+        (tok in lower_path if tok.startswith(("/", ":")) else tok in lower_url)
+        for tok in _GEMINI_URL_TOKENS
     ):
+        return "gemini"
+    if "/converse" in lower_path and ("bedrock" in lower_url or "/model/" in lower_path):
+        return "bedrock"
+    if "/api/" in lower_path and lower_path.rstrip("/").endswith(_OLLAMA_PATH_SUFFIXES):
         return "ollama"
     if any(tok in lower_url for tok in _COHERE_URL_TOKENS):
         return "cohere"
-    if any(tok in lower_url for tok in _OPENAI_URL_TOKENS):
+    if any(
+        (tok in lower_path if tok.startswith("/") else tok in lower_url)
+        for tok in _OPENAI_URL_TOKENS
+    ):
         return "openai"
 
     if isinstance(response_body, dict):
@@ -151,14 +199,14 @@ def _extract_openai_text(content: Any) -> list[str]:
 def _extract_openai_cached_tokens(usage_data: dict[str, Any]) -> int:
     details = usage_data.get("prompt_tokens_details") or usage_data.get("input_tokens_details")
     if isinstance(details, dict):
-        return int(details.get("cached_tokens", 0) or 0)
+        return _safe_int(details.get("cached_tokens"), 0)
     return 0
 
 
 def _extract_openai_reasoning_tokens(usage_data: dict[str, Any]) -> int:
     details = usage_data.get("completion_tokens_details") or usage_data.get("output_tokens_details")
     if isinstance(details, dict):
-        return int(details.get("reasoning_tokens", 0) or 0)
+        return _safe_int(details.get("reasoning_tokens"), 0)
     return 0
 
 
@@ -168,19 +216,24 @@ def _parse_openai_json(
     response_body: dict[str, Any],
     custom_pricing: dict[str, ModelPrice] | None,
 ) -> LLMCallSummary:
-    model = response_body.get("model") or (
-        request_body.get("model") if isinstance(request_body, dict) else None
+    model = _extract_model_name(
+        response_body.get("model"),
+        request_body.get("model") if isinstance(request_body, dict) else None,
     )
     if not model:
         azure_match = _AZURE_DEPLOYMENT_RE.search(url)
         if azure_match:
             model = azure_match.group(1)
 
-    usage_data = response_body.get("usage") or {}
-    input_tokens = int(usage_data.get("prompt_tokens", usage_data.get("input_tokens", 0)) or 0)
-    output_tokens = int(
-        usage_data.get("completion_tokens", usage_data.get("output_tokens", 0)) or 0
-    )
+    usage_data = _as_dict(response_body.get("usage"))
+    raw_in = usage_data.get("prompt_tokens")
+    if raw_in is None:
+        raw_in = usage_data.get("input_tokens")
+    input_tokens = _safe_int(raw_in, 0)
+    raw_out = usage_data.get("completion_tokens")
+    if raw_out is None:
+        raw_out = usage_data.get("output_tokens")
+    output_tokens = _safe_int(raw_out, 0)
     cached_tokens = _extract_openai_cached_tokens(usage_data)
     reasoning_tokens = _extract_openai_reasoning_tokens(usage_data)
     usage = Usage(
@@ -194,37 +247,52 @@ def _parse_openai_json(
     texts: list[str] = []
     thinking_parts: list[str] = []
 
-    for choice in response_body.get("choices", []) or []:
-        msg = choice.get("message") or {}
+    for choice in _as_list(response_body.get("choices")):
+        if not isinstance(choice, dict):
+            continue
+        msg = _as_dict(choice.get("message"))
         texts.extend(_extract_openai_text(msg.get("content")))
         rc = msg.get("reasoning_content") or msg.get("reasoning")
         if isinstance(rc, str) and rc:
             thinking_parts.append(rc)
-        for tc in msg.get("tool_calls") or []:
-            fn = tc.get("function") or {}
-            if fn.get("name"):
+        for tc in _as_list(msg.get("tool_calls")):
+            if not isinstance(tc, dict):
+                continue
+            fn = _as_dict(tc.get("function"))
+            fn_name = fn.get("name")
+            if isinstance(fn_name, str) and fn_name:
                 tool_calls.append(
                     ToolCall(
-                        name=str(fn["name"]),
+                        name=fn_name,
                         arguments=_parse_json_args(fn.get("arguments")),
-                        call_id=tc.get("id"),
+                        call_id=_as_optional_str(tc.get("id")),
                     )
                 )
 
-    for item in response_body.get("output", []) or []:
+    for item in _as_list(response_body.get("output")):
         if not isinstance(item, dict):
             continue
         item_type = item.get("type")
-        if item_type == "function_call" and item.get("name"):
+        if item_type == "function_call" and isinstance(item.get("name"), str) and item["name"]:
+            call_id = _as_optional_str(item.get("call_id")) or _as_optional_str(item.get("id"))
             tool_calls.append(
                 ToolCall(
-                    name=str(item["name"]),
+                    name=item["name"],
                     arguments=_parse_json_args(item.get("arguments")),
-                    call_id=item.get("call_id") or item.get("id"),
+                    call_id=call_id,
                 )
             )
         elif item_type == "message":
             texts.extend(_extract_openai_text(item.get("content")))
+        elif item_type == "reasoning":
+            for part in _as_list(item.get("summary")):
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") in {"summary_text", "text"}
+                    and isinstance(part.get("text"), str)
+                    and part["text"]
+                ):
+                    thinking_parts.append(part["text"])
 
     if not texts and isinstance(response_body.get("text"), str) and response_body["text"]:
         texts.append(response_body["text"])
@@ -256,14 +324,15 @@ def _parse_anthropic_json(
     response_body: dict[str, Any],
     custom_pricing: dict[str, ModelPrice] | None,
 ) -> LLMCallSummary:
-    model = response_body.get("model") or (
-        request_body.get("model") if isinstance(request_body, dict) else None
+    model = _extract_model_name(
+        response_body.get("model"),
+        request_body.get("model") if isinstance(request_body, dict) else None,
     )
-    usage_data = response_body.get("usage") or {}
-    cache_read = int(usage_data.get("cache_read_input_tokens", 0) or 0)
-    cache_write = int(usage_data.get("cache_creation_input_tokens", 0) or 0)
-    input_tokens = int(usage_data.get("input_tokens", 0) or 0) + cache_write + cache_read
-    output_tokens = int(usage_data.get("output_tokens", 0) or 0)
+    usage_data = _as_dict(response_body.get("usage"))
+    cache_read = _safe_int(usage_data.get("cache_read_input_tokens"), 0)
+    cache_write = _safe_int(usage_data.get("cache_creation_input_tokens"), 0)
+    input_tokens = _safe_int(usage_data.get("input_tokens"), 0) + cache_write + cache_read
+    output_tokens = _safe_int(usage_data.get("output_tokens"), 0)
     usage = Usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -274,7 +343,7 @@ def _parse_anthropic_json(
     tool_calls: list[ToolCall] = []
     texts: list[str] = []
     thinking_parts: list[str] = []
-    for block in response_body.get("content") or []:
+    for block in _as_list(response_body.get("content")):
         if not isinstance(block, dict):
             continue
         btype = block.get("type")
@@ -282,12 +351,12 @@ def _parse_anthropic_json(
             texts.append(block["text"])
         elif btype == "thinking" and isinstance(block.get("thinking"), str):
             thinking_parts.append(block["thinking"])
-        elif btype == "tool_use" and block.get("name"):
+        elif btype == "tool_use" and isinstance(block.get("name"), str) and block["name"]:
             tool_calls.append(
                 ToolCall(
-                    name=str(block["name"]),
+                    name=block["name"],
                     arguments=_parse_json_args(block.get("input")),
-                    call_id=block.get("id"),
+                    call_id=_as_optional_str(block.get("id")),
                 )
             )
 
@@ -315,17 +384,17 @@ def _parse_gemini_json(
     response_body: dict[str, Any],
     custom_pricing: dict[str, ModelPrice] | None,
 ) -> LLMCallSummary:
-    model = response_body.get("modelVersion")
+    model = _extract_model_name(response_body.get("modelVersion"))
     if not model:
         match = _GEMINI_MODEL_RE.search(url)
         if match:
             model = match.group(1)
 
-    usage_meta = response_body.get("usageMetadata") or {}
-    input_tokens = int(usage_meta.get("promptTokenCount", 0) or 0)
-    cached_tokens = int(usage_meta.get("cachedContentTokenCount", 0) or 0)
-    thoughts_tokens = int(usage_meta.get("thoughtsTokenCount", 0) or 0)
-    output_tokens = int(usage_meta.get("candidatesTokenCount", 0) or 0) + thoughts_tokens
+    usage_meta = _as_dict(response_body.get("usageMetadata"))
+    input_tokens = _safe_int(usage_meta.get("promptTokenCount"), 0)
+    cached_tokens = _safe_int(usage_meta.get("cachedContentTokenCount"), 0)
+    thoughts_tokens = _safe_int(usage_meta.get("thoughtsTokenCount"), 0)
+    output_tokens = _safe_int(usage_meta.get("candidatesTokenCount"), 0) + thoughts_tokens
     usage = Usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -336,9 +405,11 @@ def _parse_gemini_json(
     tool_calls: list[ToolCall] = []
     texts: list[str] = []
     thinking_parts: list[str] = []
-    for cand in response_body.get("candidates") or []:
-        content = cand.get("content") or {}
-        for part in content.get("parts") or []:
+    for cand in _as_list(response_body.get("candidates")):
+        if not isinstance(cand, dict):
+            continue
+        content = _as_dict(cand.get("content"))
+        for part in _as_list(content.get("parts")):
             if not isinstance(part, dict):
                 continue
             if isinstance(part.get("text"), str):
@@ -347,10 +418,14 @@ def _parse_gemini_json(
                 else:
                     texts.append(part["text"])
             fn_call = part.get("functionCall")
-            if isinstance(fn_call, dict) and fn_call.get("name"):
+            if (
+                isinstance(fn_call, dict)
+                and isinstance(fn_call.get("name"), str)
+                and fn_call["name"]
+            ):
                 tool_calls.append(
                     ToolCall(
-                        name=str(fn_call["name"]),
+                        name=fn_call["name"],
                         arguments=_parse_json_args(fn_call.get("args")),
                     )
                 )
@@ -378,14 +453,16 @@ def _parse_ollama_json(
     response_body: dict[str, Any],
     custom_pricing: dict[str, ModelPrice] | None,
 ) -> LLMCallSummary:
-    model = response_body.get("model") or (
-        request_body.get("model") if isinstance(request_body, dict) else None
+    model = _extract_model_name(
+        response_body.get("model"),
+        request_body.get("model") if isinstance(request_body, dict) else None,
     )
-    input_tokens = int(response_body.get("prompt_eval_count", 0) or 0)
-    output_tokens = int(response_body.get("eval_count", 0) or 0)
+    input_tokens = _safe_int(response_body.get("prompt_eval_count"), 0)
+    output_tokens = _safe_int(response_body.get("eval_count"), 0)
     usage = Usage(input_tokens=input_tokens, output_tokens=output_tokens)
 
     texts: list[str] = []
+    thinking_parts: list[str] = []
     tool_calls: list[ToolCall] = []
     if isinstance(response_body.get("response"), str) and response_body["response"]:
         texts.append(response_body["response"])
@@ -393,25 +470,31 @@ def _parse_ollama_json(
     if isinstance(msg, dict):
         if isinstance(msg.get("content"), str) and msg["content"]:
             texts.append(msg["content"])
-        for tc in msg.get("tool_calls") or []:
-            fn = tc.get("function") or {}
-            if fn.get("name"):
+        if isinstance(msg.get("thinking"), str) and msg["thinking"]:
+            thinking_parts.append(msg["thinking"])
+        for tc in _as_list(msg.get("tool_calls")):
+            if not isinstance(tc, dict):
+                continue
+            fn = _as_dict(tc.get("function"))
+            fn_name = fn.get("name")
+            if isinstance(fn_name, str) and fn_name:
                 tool_calls.append(
                     ToolCall(
-                        name=str(fn["name"]),
+                        name=fn_name,
                         arguments=_parse_json_args(fn.get("arguments")),
-                        call_id=tc.get("id"),
+                        call_id=_as_optional_str(tc.get("id")),
                     )
                 )
 
     cost = estimate_cost_usd(model, usage.input_tokens, usage.output_tokens, custom_pricing)
     return LLMCallSummary(
         provider="ollama",
-        model=str(model) if model else None,
+        model=model,
         usage=usage,
         estimated_cost_usd=cost,
         tool_calls=tuple(tool_calls),
         text="\n".join(texts),
+        thinking="\n".join(thinking_parts),
     )
 
 
@@ -421,7 +504,9 @@ def _parse_bedrock_json(
     response_body: dict[str, Any],
     custom_pricing: dict[str, ModelPrice] | None,
 ) -> LLMCallSummary:
-    model: str | None = request_body.get("modelId") if isinstance(request_body, dict) else None
+    model = _extract_model_name(
+        request_body.get("modelId") if isinstance(request_body, dict) else None
+    )
     if not model:
         match = _BEDROCK_MODEL_RE.search(url)
         if match:
@@ -429,11 +514,11 @@ def _parse_bedrock_json(
 
             model = unquote(match.group(1))
 
-    usage_data = response_body.get("usage") or {}
-    cache_read = int(usage_data.get("cacheReadInputTokens", 0) or 0)
-    cache_write = int(usage_data.get("cacheWriteInputTokens", 0) or 0)
-    input_tokens = int(usage_data.get("inputTokens", 0) or 0) + cache_read + cache_write
-    output_tokens = int(usage_data.get("outputTokens", 0) or 0)
+    usage_data = _as_dict(response_body.get("usage"))
+    cache_read = _safe_int(usage_data.get("cacheReadInputTokens"), 0)
+    cache_write = _safe_int(usage_data.get("cacheWriteInputTokens"), 0)
+    input_tokens = _safe_int(usage_data.get("inputTokens"), 0) + cache_read + cache_write
+    output_tokens = _safe_int(usage_data.get("outputTokens"), 0)
     usage = Usage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
@@ -446,18 +531,18 @@ def _parse_bedrock_json(
     output_obj = response_body.get("output")
     msg = output_obj.get("message") if isinstance(output_obj, dict) else None
     if isinstance(msg, dict):
-        for block in msg.get("content") or []:
+        for block in _as_list(msg.get("content")):
             if not isinstance(block, dict):
                 continue
             if isinstance(block.get("text"), str):
                 texts.append(block["text"])
             tu = block.get("toolUse")
-            if isinstance(tu, dict) and tu.get("name"):
+            if isinstance(tu, dict) and isinstance(tu.get("name"), str) and tu["name"]:
                 tool_calls.append(
                     ToolCall(
-                        name=str(tu["name"]),
+                        name=tu["name"],
                         arguments=_parse_json_args(tu.get("input")),
-                        call_id=tu.get("toolUseId"),
+                        call_id=_as_optional_str(tu.get("toolUseId")),
                     )
                 )
 
@@ -501,6 +586,20 @@ def split_sse_chunks(text: str) -> list[str]:
             chunks.append(piece)
         idx += 2
     return chunks
+
+
+def redact_stream_chunks(
+    chunks: Sequence[str],
+    patterns: Sequence[re.Pattern[str]],
+) -> list[str]:
+    """Redact regex patterns across stream chunks, re-splitting if a match spans chunk edges."""
+    if not patterns:
+        return list(chunks)
+    per_chunk = [redact_text(c, patterns) for c in chunks]
+    joined_redacted = redact_text("".join(chunks), patterns)
+    if joined_redacted != "".join(per_chunk):
+        return split_sse_chunks(joined_redacted)
+    return per_chunk
 
 
 def _strip_one_leading_space(value: str) -> str:
@@ -557,7 +656,9 @@ def _parse_openai_sse(
     events: Sequence[tuple[str | None, Any]],
     custom_pricing: dict[str, ModelPrice] | None,
 ) -> LLMCallSummary:
-    model: str | None = request_body.get("model") if isinstance(request_body, dict) else None
+    model = _extract_model_name(
+        request_body.get("model") if isinstance(request_body, dict) else None
+    )
     if not model:
         azure_match = _AZURE_DEPLOYMENT_RE.search(url)
         if azure_match:
@@ -570,28 +671,61 @@ def _parse_openai_sse(
     thinking_parts: list[str] = []
     # index -> {"id": str|None, "name": str, "args": list[str]}
     tool_acc: dict[int, dict[str, Any]] = {}
+    responses_items: dict[str, dict[str, str | None]] = {}
     responses_calls: list[ToolCall] = []
 
     for _ev, payload in events:
         if not isinstance(payload, dict):
             continue
 
-        if payload.get("model"):
-            model = str(payload["model"])
+        if isinstance(payload.get("model"), str) and payload["model"]:
+            model = payload["model"]
 
         # OpenAI Responses API streaming
         ptype = payload.get("type")
         if ptype == "response.output_text.delta" and isinstance(payload.get("delta"), str):
             text_parts.append(payload["delta"])
             continue
-        if ptype == "response.function_call_arguments.done" and payload.get("name"):
-            responses_calls.append(
-                ToolCall(
-                    name=str(payload["name"]),
-                    arguments=_parse_json_args(payload.get("arguments")),
-                    call_id=payload.get("call_id") or payload.get("item_id"),
-                )
+        if ptype in {
+            "response.reasoning_summary_text.delta",
+            "response.reasoning.delta",
+        } and isinstance(payload.get("delta"), str):
+            thinking_parts.append(payload["delta"])
+            continue
+        if ptype == "response.output_item.added":
+            item = payload.get("item")
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                item_id = _as_optional_str(item.get("id"))
+                if item_id:
+                    raw_item_name = item.get("name")
+                    item_call_id = _as_optional_str(item.get("call_id")) or item_id
+                    responses_items[item_id] = {
+                        "name": raw_item_name if isinstance(raw_item_name, str) else "",
+                        "call_id": item_call_id,
+                    }
+            continue
+        if ptype == "response.function_call_arguments.done":
+            item_id = _as_optional_str(payload.get("item_id"))
+            tracked = responses_items.get(item_id) if item_id else None
+            raw_done_name = payload.get("name")
+            tool_name = (
+                raw_done_name
+                if isinstance(raw_done_name, str) and raw_done_name
+                else (tracked["name"] if tracked and tracked["name"] else "")
             )
+            if tool_name:
+                call_id = (
+                    _as_optional_str(payload.get("call_id"))
+                    or (tracked["call_id"] if tracked else None)
+                    or item_id
+                )
+                responses_calls.append(
+                    ToolCall(
+                        name=tool_name,
+                        arguments=_parse_json_args(payload.get("arguments")),
+                        call_id=call_id,
+                    )
+                )
             continue
         if ptype == "response.completed" and isinstance(payload.get("response"), dict):
             summary = _parse_openai_json(url, request_body, payload["response"], custom_pricing)
@@ -602,19 +736,23 @@ def _parse_openai_sse(
                 estimated_cost_usd=summary.estimated_cost_usd,
                 tool_calls=summary.tool_calls or tuple(responses_calls),
                 text=summary.text or "".join(text_parts),
+                thinking=summary.thinking or "".join(thinking_parts),
                 is_stream=True,
             )
 
         # OpenAI Chat Completions streaming
         usage_data = payload.get("usage")
         if isinstance(usage_data, dict):
-            input_tokens = int(
-                usage_data.get("prompt_tokens", usage_data.get("input_tokens", input_tokens)) or 0
-            )
-            output_tokens = int(
-                usage_data.get("completion_tokens", usage_data.get("output_tokens", output_tokens))
-                or 0
-            )
+            raw_in = usage_data.get("prompt_tokens")
+            if raw_in is None:
+                raw_in = usage_data.get("input_tokens")
+            if raw_in is not None:
+                input_tokens = _safe_int(raw_in, input_tokens)
+            raw_out = usage_data.get("completion_tokens")
+            if raw_out is None:
+                raw_out = usage_data.get("output_tokens")
+            if raw_out is not None:
+                output_tokens = _safe_int(raw_out, output_tokens)
             c_toks = _extract_openai_cached_tokens(usage_data)
             if c_toks:
                 cached_tokens = c_toks
@@ -622,21 +760,27 @@ def _parse_openai_sse(
             if r_toks:
                 reasoning_tokens = r_toks
 
-        for choice in payload.get("choices") or []:
-            delta = choice.get("delta") or {}
+        for choice in _as_list(payload.get("choices")):
+            if not isinstance(choice, dict):
+                continue
+            delta = _as_dict(choice.get("delta"))
             if isinstance(delta.get("content"), str):
                 text_parts.append(delta["content"])
             rc = delta.get("reasoning_content") or delta.get("reasoning")
             if isinstance(rc, str) and rc:
                 thinking_parts.append(rc)
-            for tc in delta.get("tool_calls") or []:
-                idx = int(tc.get("index", 0))
+            for tc in _as_list(delta.get("tool_calls")):
+                if not isinstance(tc, dict):
+                    continue
+                idx = _safe_int(tc.get("index"), 0)
                 slot = tool_acc.setdefault(idx, {"id": None, "name": "", "args": []})
-                if tc.get("id"):
-                    slot["id"] = tc["id"]
-                fn = tc.get("function") or {}
-                if fn.get("name") and not slot["name"]:
-                    slot["name"] = str(fn["name"])
+                tc_id = _as_optional_str(tc.get("id"))
+                if tc_id:
+                    slot["id"] = tc_id
+                fn = _as_dict(tc.get("function"))
+                fn_name = fn.get("name")
+                if isinstance(fn_name, str) and fn_name and not slot["name"]:
+                    slot["name"] = fn_name
                 if isinstance(fn.get("arguments"), str):
                     slot["args"].append(fn["arguments"])
 
@@ -679,8 +823,10 @@ def _parse_anthropic_sse(
     events: Sequence[tuple[str | None, Any]],
     custom_pricing: dict[str, ModelPrice] | None,
 ) -> LLMCallSummary:
-    model: str | None = request_body.get("model") if isinstance(request_body, dict) else None
-    input_tokens = 0
+    model = _extract_model_name(
+        request_body.get("model") if isinstance(request_body, dict) else None
+    )
+    base_input_tokens = 0
     output_tokens = 0
     cached_tokens = 0
     cache_write_tokens = 0
@@ -695,26 +841,45 @@ def _parse_anthropic_sse(
         etype = payload.get("type") or ev_name
 
         if etype == "message_start":
-            msg = payload.get("message") or {}
-            if msg.get("model"):
-                model = str(msg["model"])
-            u = msg.get("usage") or {}
-            cached_tokens = int(u.get("cache_read_input_tokens", 0) or 0)
-            cache_write_tokens = int(u.get("cache_creation_input_tokens", 0) or 0)
-            input_tokens = int(u.get("input_tokens", 0) or 0) + cache_write_tokens + cached_tokens
-            output_tokens = int(u.get("output_tokens", output_tokens) or 0)
+            msg = _as_dict(payload.get("message"))
+            if isinstance(msg.get("model"), str) and msg["model"]:
+                model = msg["model"]
+            u = _as_dict(msg.get("usage"))
+            if u.get("cache_read_input_tokens") is not None:
+                cached_tokens = _safe_int(u.get("cache_read_input_tokens"), cached_tokens)
+            if u.get("cache_creation_input_tokens") is not None:
+                cache_write_tokens = _safe_int(
+                    u.get("cache_creation_input_tokens"), cache_write_tokens
+                )
+            if u.get("input_tokens") is not None:
+                base_input_tokens = _safe_int(u.get("input_tokens"), base_input_tokens)
+            if u.get("output_tokens") is not None:
+                output_tokens = _safe_int(u.get("output_tokens"), output_tokens)
         elif etype == "content_block_start":
-            idx = int(payload.get("index", 0))
-            block = payload.get("content_block") or {}
-            if block.get("type") == "tool_use":
+            idx = _safe_int(payload.get("index"), 0)
+            block = _as_dict(payload.get("content_block"))
+            btype = block.get("type")
+            if btype == "text" and isinstance(block.get("text"), str) and block["text"]:
+                text_parts.append(block["text"])
+            elif (
+                btype == "thinking" and isinstance(block.get("thinking"), str) and block["thinking"]
+            ):
+                thinking_parts.append(block["thinking"])
+            elif btype == "tool_use":
+                raw_name = block.get("name")
+                initial_input = block.get("input")
+                has_initial_input = (isinstance(initial_input, dict) and bool(initial_input)) or (
+                    isinstance(initial_input, str) and bool(initial_input.strip())
+                )
                 tool_acc[idx] = {
-                    "id": block.get("id"),
-                    "name": str(block.get("name", "")),
+                    "id": _as_optional_str(block.get("id")),
+                    "name": raw_name if isinstance(raw_name, str) else "",
                     "args": [],
+                    "initial_input": initial_input if has_initial_input else None,
                 }
         elif etype == "content_block_delta":
-            idx = int(payload.get("index", 0))
-            delta = payload.get("delta") or {}
+            idx = _safe_int(payload.get("index"), 0)
+            delta = _as_dict(payload.get("delta"))
             dtype = delta.get("type")
             if dtype == "text_delta" and isinstance(delta.get("text"), str):
                 text_parts.append(delta["text"])
@@ -724,14 +889,31 @@ def _parse_anthropic_sse(
                 if idx in tool_acc:
                     tool_acc[idx]["args"].append(delta["partial_json"])
         elif etype == "message_delta":
-            u = payload.get("usage") or {}
-            if "output_tokens" in u:
-                output_tokens = int(u.get("output_tokens", 0) or 0)
+            u = _as_dict(payload.get("usage"))
+            if u.get("input_tokens") is not None:
+                base_input_tokens = _safe_int(u.get("input_tokens"), base_input_tokens)
+            if u.get("cache_read_input_tokens") is not None:
+                cached_tokens = _safe_int(u.get("cache_read_input_tokens"), cached_tokens)
+            if u.get("cache_creation_input_tokens") is not None:
+                cache_write_tokens = _safe_int(
+                    u.get("cache_creation_input_tokens"), cache_write_tokens
+                )
+            if u.get("output_tokens") is not None:
+                output_tokens = _safe_int(u.get("output_tokens"), output_tokens)
 
+    input_tokens = base_input_tokens + cache_write_tokens + cached_tokens
     tool_calls = tuple(
         ToolCall(
             name=slot["name"],
-            arguments=_parse_json_args("".join(slot["args"])),
+            arguments=(
+                _parse_json_args("".join(slot["args"]))
+                if slot["args"]
+                else (
+                    _parse_json_args(slot["initial_input"])
+                    if slot.get("initial_input") is not None
+                    else {}
+                )
+            ),
             call_id=slot["id"],
         )
         for _, slot in sorted(tool_acc.items())
@@ -775,6 +957,7 @@ def _parse_gemini_sse(
         model = match.group(1)
 
     input_tokens = 0
+    candidates_tokens = 0
     output_tokens = 0
     cached_tokens = 0
     reasoning_tokens = 0
@@ -785,20 +968,25 @@ def _parse_gemini_sse(
     for _ev, payload in events:
         if not isinstance(payload, dict):
             continue
-        if payload.get("modelVersion"):
-            model = str(payload["modelVersion"])
+        if isinstance(payload.get("modelVersion"), str) and payload["modelVersion"]:
+            model = payload["modelVersion"]
         um = payload.get("usageMetadata")
         if isinstance(um, dict):
-            input_tokens = int(um.get("promptTokenCount", input_tokens) or 0)
-            thoughts = int(um.get("thoughtsTokenCount", 0) or 0)
+            if um.get("promptTokenCount") is not None:
+                input_tokens = _safe_int(um.get("promptTokenCount"), input_tokens)
+            thoughts = _safe_int(um.get("thoughtsTokenCount"), 0)
             if thoughts:
                 reasoning_tokens = thoughts
-            output_tokens = int(um.get("candidatesTokenCount", 0) or 0) + thoughts
-            if "cachedContentTokenCount" in um:
-                cached_tokens = int(um.get("cachedContentTokenCount", 0) or 0)
-        for cand in payload.get("candidates") or []:
-            content = cand.get("content") or {}
-            for part in content.get("parts") or []:
+            if um.get("candidatesTokenCount") is not None:
+                candidates_tokens = _safe_int(um.get("candidatesTokenCount"), candidates_tokens)
+            output_tokens = candidates_tokens + reasoning_tokens
+            if um.get("cachedContentTokenCount") is not None:
+                cached_tokens = _safe_int(um.get("cachedContentTokenCount"), cached_tokens)
+        for cand in _as_list(payload.get("candidates")):
+            if not isinstance(cand, dict):
+                continue
+            content = _as_dict(cand.get("content"))
+            for part in _as_list(content.get("parts")):
                 if not isinstance(part, dict):
                     continue
                 if isinstance(part.get("text"), str):
@@ -807,10 +995,14 @@ def _parse_gemini_sse(
                     else:
                         text_parts.append(part["text"])
                 fn_call = part.get("functionCall")
-                if isinstance(fn_call, dict) and fn_call.get("name"):
+                if (
+                    isinstance(fn_call, dict)
+                    and isinstance(fn_call.get("name"), str)
+                    and fn_call["name"]
+                ):
                     tool_calls.append(
                         ToolCall(
-                            name=str(fn_call["name"]),
+                            name=fn_call["name"],
                             arguments=_parse_json_args(fn_call.get("args")),
                         )
                     )
@@ -845,10 +1037,13 @@ def _parse_ollama_ndjson(
     raw_stream: str,
     custom_pricing: dict[str, ModelPrice] | None,
 ) -> LLMCallSummary:
-    model: str | None = request_body.get("model") if isinstance(request_body, dict) else None
+    model = _extract_model_name(
+        request_body.get("model") if isinstance(request_body, dict) else None
+    )
     input_tokens = 0
     output_tokens = 0
     text_parts: list[str] = []
+    thinking_parts: list[str] = []
     tool_calls: list[ToolCall] = []
 
     for line in raw_stream.splitlines():
@@ -861,26 +1056,31 @@ def _parse_ollama_ndjson(
             continue
         if not isinstance(payload, dict):
             continue
-        if payload.get("model"):
-            model = str(payload["model"])
-        if "prompt_eval_count" in payload:
-            input_tokens = int(payload.get("prompt_eval_count", 0) or 0)
-        if "eval_count" in payload:
-            output_tokens = int(payload.get("eval_count", 0) or 0)
+        if isinstance(payload.get("model"), str) and payload["model"]:
+            model = payload["model"]
+        if payload.get("prompt_eval_count") is not None:
+            input_tokens = _safe_int(payload.get("prompt_eval_count"), input_tokens)
+        if payload.get("eval_count") is not None:
+            output_tokens = _safe_int(payload.get("eval_count"), output_tokens)
         if isinstance(payload.get("response"), str) and payload["response"]:
             text_parts.append(payload["response"])
         msg = payload.get("message")
         if isinstance(msg, dict):
             if isinstance(msg.get("content"), str) and msg["content"]:
                 text_parts.append(msg["content"])
-            for tc in msg.get("tool_calls") or []:
-                fn = tc.get("function") or {}
-                if fn.get("name"):
+            if isinstance(msg.get("thinking"), str) and msg["thinking"]:
+                thinking_parts.append(msg["thinking"])
+            for tc in _as_list(msg.get("tool_calls")):
+                if not isinstance(tc, dict):
+                    continue
+                fn = _as_dict(tc.get("function"))
+                fn_name = fn.get("name")
+                if isinstance(fn_name, str) and fn_name:
                     tool_calls.append(
                         ToolCall(
-                            name=str(fn["name"]),
+                            name=fn_name,
                             arguments=_parse_json_args(fn.get("arguments")),
-                            call_id=tc.get("id"),
+                            call_id=_as_optional_str(tc.get("id")),
                         )
                     )
 
@@ -893,6 +1093,7 @@ def _parse_ollama_ndjson(
         estimated_cost_usd=cost,
         tool_calls=tuple(tool_calls),
         text="".join(text_parts),
+        thinking="".join(thinking_parts),
         is_stream=True,
     )
 
@@ -902,13 +1103,14 @@ def _parse_cohere_json(
     response_body: dict[str, Any],
     custom_pricing: dict[str, ModelPrice] | None,
 ) -> LLMCallSummary:
-    model = response_body.get("model") or (
-        request_body.get("model") if isinstance(request_body, dict) else None
+    model = _extract_model_name(
+        response_body.get("model"),
+        request_body.get("model") if isinstance(request_body, dict) else None,
     )
-    meta = response_body.get("meta") or {}
-    usage_map = meta.get("tokens") or meta.get("billed_units") or {}
-    input_tokens = int(usage_map.get("input_tokens", 0) or 0)
-    output_tokens = int(usage_map.get("output_tokens", 0) or 0)
+    meta = _as_dict(response_body.get("meta"))
+    usage_map = _as_dict(meta.get("tokens")) or _as_dict(meta.get("billed_units"))
+    input_tokens = _safe_int(usage_map.get("input_tokens"), 0)
+    output_tokens = _safe_int(usage_map.get("output_tokens"), 0)
     usage = Usage(input_tokens=input_tokens, output_tokens=output_tokens)
 
     texts: list[str] = []
@@ -916,31 +1118,32 @@ def _parse_cohere_json(
 
     msg = response_body.get("message")
     if isinstance(msg, dict):
-        for block in msg.get("content") or []:
+        for block in _as_list(msg.get("content")):
             if isinstance(block, dict) and isinstance(block.get("text"), str):
                 texts.append(block["text"])
-        for tc in msg.get("tool_calls") or []:
+        for tc in _as_list(msg.get("tool_calls")):
             if not isinstance(tc, dict):
                 continue
-            fn = tc.get("function") or {}
-            if fn.get("name"):
+            fn = _as_dict(tc.get("function"))
+            fn_name = fn.get("name")
+            if isinstance(fn_name, str) and fn_name:
                 tool_calls.append(
                     ToolCall(
-                        name=str(fn["name"]),
+                        name=fn_name,
                         arguments=_parse_json_args(fn.get("arguments")),
-                        call_id=tc.get("id"),
+                        call_id=_as_optional_str(tc.get("id")),
                     )
                 )
     elif isinstance(response_body.get("text"), str) and response_body["text"]:
         texts.append(response_body["text"])
 
-    for tc in response_body.get("tool_calls") or []:
-        if isinstance(tc, dict) and tc.get("name"):
+    for tc in _as_list(response_body.get("tool_calls")):
+        if isinstance(tc, dict) and isinstance(tc.get("name"), str) and tc["name"]:
             tool_calls.append(
                 ToolCall(
-                    name=str(tc["name"]),
+                    name=tc["name"],
                     arguments=_parse_json_args(tc.get("parameters")),
-                    call_id=tc.get("id"),
+                    call_id=_as_optional_str(tc.get("id")),
                 )
             )
 
@@ -960,7 +1163,9 @@ def _parse_cohere_sse(
     events: Sequence[tuple[str | None, Any]],
     custom_pricing: dict[str, ModelPrice] | None,
 ) -> LLMCallSummary:
-    model: str | None = request_body.get("model") if isinstance(request_body, dict) else None
+    model = _extract_model_name(
+        request_body.get("model") if isinstance(request_body, dict) else None
+    )
     input_tokens = 0
     output_tokens = 0
     text_parts: list[str] = []
@@ -970,32 +1175,35 @@ def _parse_cohere_sse(
         if not isinstance(payload, dict):
             continue
         etype = payload.get("type") or ev_name
-        delta = payload.get("delta") or {}
+        delta = _as_dict(payload.get("delta"))
 
         if etype == "content-delta":
-            content = (delta.get("message") or {}).get("content") or {}
+            content = _as_dict(_as_dict(delta.get("message")).get("content"))
             if isinstance(content.get("text"), str):
                 text_parts.append(content["text"])
         elif etype == "tool-call-start":
-            idx = int(payload.get("index", 0))
-            tc = (delta.get("message") or {}).get("tool_calls") or {}
-            fn = tc.get("function") or {}
+            idx = _safe_int(payload.get("index"), 0)
+            tc = _as_dict(_as_dict(delta.get("message")).get("tool_calls"))
+            fn = _as_dict(tc.get("function"))
+            fn_name = fn.get("name")
             tool_acc[idx] = {
-                "id": tc.get("id"),
-                "name": str(fn.get("name", "")),
-                "args": [str(fn["arguments"])] if isinstance(fn.get("arguments"), str) else [],
+                "id": _as_optional_str(tc.get("id")),
+                "name": fn_name if isinstance(fn_name, str) else "",
+                "args": [fn["arguments"]] if isinstance(fn.get("arguments"), str) else [],
             }
         elif etype == "tool-call-delta":
-            idx = int(payload.get("index", 0))
-            tc = (delta.get("message") or {}).get("tool_calls") or {}
-            fn = tc.get("function") or {}
+            idx = _safe_int(payload.get("index"), 0)
+            tc = _as_dict(_as_dict(delta.get("message")).get("tool_calls"))
+            fn = _as_dict(tc.get("function"))
             if idx in tool_acc and isinstance(fn.get("arguments"), str):
                 tool_acc[idx]["args"].append(fn["arguments"])
         elif etype == "message-end":
-            u = delta.get("usage") or {}
-            toks = u.get("tokens") or u.get("billed_units") or {}
-            input_tokens = int(toks.get("input_tokens", input_tokens) or 0)
-            output_tokens = int(toks.get("output_tokens", output_tokens) or 0)
+            u = _as_dict(delta.get("usage"))
+            toks = _as_dict(u.get("tokens")) or _as_dict(u.get("billed_units"))
+            if toks.get("input_tokens") is not None:
+                input_tokens = _safe_int(toks.get("input_tokens"), input_tokens)
+            if toks.get("output_tokens") is not None:
+                output_tokens = _safe_int(toks.get("output_tokens"), output_tokens)
 
     tool_calls = tuple(
         ToolCall(

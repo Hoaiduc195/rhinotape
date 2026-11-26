@@ -60,6 +60,20 @@ class TapeAssertionError(AssertionError, TapeError):
     """Raised when a tape assertion (budget, tokens, tool calls) fails."""
 
 
+def _require_int(value: Any, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{field_name} must be an int, got {type(value).__name__}")
+    return value
+
+
+def _validate_headers(raw_headers: Any) -> dict[str, str]:
+    if raw_headers is None:
+        return {}
+    if not isinstance(raw_headers, dict):
+        raise TypeError(f"headers must be a dict or None, got {type(raw_headers).__name__}")
+    return {str(k): str(v) for k, v in raw_headers.items()}
+
+
 @dataclass(frozen=True)
 class ToolCall:
     """Normalized representation of a single LLM tool/function call."""
@@ -77,10 +91,13 @@ class ToolCall:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ToolCall:
+        if not isinstance(data, dict):
+            raise TypeError(f"ToolCall must be a dict, got {type(data).__name__}")
+        raw_call_id = data.get("call_id")
         return cls(
             name=str(data["name"]),
             arguments=data.get("arguments", {}),
-            call_id=data.get("call_id"),
+            call_id=None if raw_call_id is None else str(raw_call_id),
         )
 
 
@@ -114,12 +131,18 @@ class Usage:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Usage:
+        if not isinstance(data, dict):
+            raise TypeError(f"Usage must be a dict, got {type(data).__name__}")
         return cls(
-            input_tokens=int(data.get("input_tokens", 0)),
-            output_tokens=int(data.get("output_tokens", 0)),
-            cached_input_tokens=int(data.get("cached_input_tokens", 0)),
-            cache_creation_tokens=int(data.get("cache_creation_tokens", 0)),
-            reasoning_tokens=int(data.get("reasoning_tokens", 0)),
+            input_tokens=_require_int(data.get("input_tokens", 0), "input_tokens"),
+            output_tokens=_require_int(data.get("output_tokens", 0), "output_tokens"),
+            cached_input_tokens=_require_int(
+                data.get("cached_input_tokens", 0), "cached_input_tokens"
+            ),
+            cache_creation_tokens=_require_int(
+                data.get("cache_creation_tokens", 0), "cache_creation_tokens"
+            ),
+            reasoning_tokens=_require_int(data.get("reasoning_tokens", 0), "reasoning_tokens"),
         )
 
 
@@ -152,12 +175,22 @@ class LLMCallSummary:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> LLMCallSummary:
+        if not isinstance(data, dict):
+            raise TypeError(f"LLMCallSummary must be a dict, got {type(data).__name__}")
+        raw_usage = data.get("usage")
+        raw_cost = data.get("estimated_cost_usd", 0.0)
+        if isinstance(raw_cost, bool):
+            raise TypeError("estimated_cost_usd must be a number, got bool")
+        raw_tool_calls = data.get("tool_calls", [])
+        if not isinstance(raw_tool_calls, list):
+            raise TypeError("tool_calls must be a list")
+        raw_model = data.get("model")
         return cls(
             provider=str(data.get("provider", "unknown")),
-            model=data.get("model"),
-            usage=Usage.from_dict(data.get("usage", {})),
-            estimated_cost_usd=float(data.get("estimated_cost_usd", 0.0)),
-            tool_calls=tuple(ToolCall.from_dict(tc) for tc in data.get("tool_calls", [])),
+            model=None if raw_model is None else str(raw_model),
+            usage=Usage.from_dict({} if raw_usage is None else raw_usage),
+            estimated_cost_usd=float(raw_cost),
+            tool_calls=tuple(ToolCall.from_dict(tc) for tc in raw_tool_calls),
             text=str(data.get("text", "")),
             thinking=str(data.get("thinking", "")),
             is_stream=bool(data.get("is_stream", False)),
@@ -187,6 +220,8 @@ class RecordedRequest:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RecordedRequest:
+        if not isinstance(data, dict):
+            raise TypeError(f"RecordedRequest must be a dict, got {type(data).__name__}")
         body = data.get("body")
         default_enc = (
             "empty" if body is None else ("json" if isinstance(body, (dict, list)) else "text")
@@ -194,7 +229,7 @@ class RecordedRequest:
         return cls(
             method=str(data["method"]),
             url=str(data["url"]),
-            headers=dict(data.get("headers", {})),
+            headers=_validate_headers(data.get("headers")),
             body=body,
             fingerprint=str(data["fingerprint"]),
             body_encoding=str(data.get("body_encoding", default_enc)),
@@ -224,8 +259,12 @@ class RecordedResponse:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RecordedResponse:
+        if not isinstance(data, dict):
+            raise TypeError(f"RecordedResponse must be a dict, got {type(data).__name__}")
         body = data.get("body")
         raw_chunks = data.get("stream_chunks")
+        if raw_chunks is not None and not isinstance(raw_chunks, (list, tuple)):
+            raise TypeError("stream_chunks must be a list or None")
         chunks = tuple(str(c) for c in raw_chunks) if raw_chunks is not None else None
         if chunks is not None:
             default_enc = "stream"
@@ -236,8 +275,8 @@ class RecordedResponse:
         else:
             default_enc = "text"
         return cls(
-            status_code=int(data["status_code"]),
-            headers=dict(data.get("headers", {})),
+            status_code=_require_int(data["status_code"], "status_code"),
+            headers=_validate_headers(data.get("headers")),
             body=body,
             body_encoding=str(data.get("body_encoding", default_enc)),
             stream_chunks=chunks,
@@ -263,9 +302,15 @@ class Interaction:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Interaction:
+        if not isinstance(data, dict):
+            raise TypeError(f"Interaction must be a dict, got {type(data).__name__}")
+        raw_latency = data.get("latency_ms", 0.0)
+        if isinstance(raw_latency, bool):
+            raise TypeError("latency_ms must be a number, got bool")
+        raw_llm = data.get("llm")
         return cls(
             request=RecordedRequest.from_dict(data["request"]),
             response=RecordedResponse.from_dict(data["response"]),
-            latency_ms=float(data.get("latency_ms", 0.0)),
-            llm=LLMCallSummary.from_dict(data.get("llm", {})),
+            latency_ms=float(raw_latency),
+            llm=LLMCallSummary.from_dict({} if raw_llm is None else raw_llm),
         )

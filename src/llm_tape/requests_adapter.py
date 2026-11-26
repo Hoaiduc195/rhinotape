@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 
 from llm_tape.models import Interaction, TapeMode
+from llm_tape.parsers import split_sse_chunks
 from llm_tape.scrubbing import encode_body_with_encoding
 
 if TYPE_CHECKING:
@@ -127,16 +128,18 @@ class _RecordingRequestsRaw:
         is_sse: bool,
         on_complete_sse: Callable[[list[str]], None] | None = None,
         on_complete_bytes: Callable[[bytes], None] | None = None,
+        on_abort: Callable[[], None] | None = None,
     ) -> None:
         self._upstream = upstream_raw
         self._is_sse = is_sse
         self._on_complete_sse = on_complete_sse
         self._on_complete_bytes = on_complete_bytes
+        self._on_abort = on_abort
         self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._text_chunks: list[str] = []
         self._byte_chunks: list[bytes] = []
         self._reached_eof = False
-        self._committed = False
+        self._settled = False
 
     def _record_bytes(self, data: bytes) -> None:
         if not data:
@@ -158,23 +161,37 @@ class _RecordingRequestsRaw:
         self._commit()
 
     def _commit(self) -> None:
-        if not self._committed:
-            self._committed = True
+        if not self._settled:
+            self._settled = True
             if self._is_sse and self._on_complete_sse is not None:
                 self._on_complete_sse(self._text_chunks)
             elif not self._is_sse and self._on_complete_bytes is not None:
                 self._on_complete_bytes(b"".join(self._byte_chunks))
 
+    def _abort(self) -> None:
+        if not self._settled:
+            self._settled = True
+            if self._on_abort is not None:
+                self._on_abort()
+
     def stream(self, amt: int | None = 65536, decode_content: bool = True) -> Iterator[bytes]:
-        for chunk in self._upstream.stream(amt=amt, decode_content=decode_content):
-            self._record_bytes(chunk)
-            yield chunk
-        self._finish()
+        try:
+            for chunk in self._upstream.stream(amt=amt, decode_content=decode_content):
+                self._record_bytes(chunk)
+                yield chunk
+            self._finish()
+        except BaseException:
+            self._abort()
+            raise
 
     def read(self, amt: int | None = None, decode_content: bool = True) -> bytes:
         if amt == 0:
             return b""
-        data: bytes = self._upstream.read(amt, decode_content=decode_content)
+        try:
+            data: bytes = self._upstream.read(amt, decode_content=decode_content)
+        except BaseException:
+            self._abort()
+            raise
         if data:
             self._record_bytes(data)
             if amt is None or amt < 0:
@@ -190,6 +207,8 @@ class _RecordingRequestsRaw:
         finally:
             if self._reached_eof:
                 self._commit()
+            else:
+                self._abort()
 
     def close(self) -> None:
         try:
@@ -198,6 +217,8 @@ class _RecordingRequestsRaw:
         finally:
             if self._reached_eof:
                 self._commit()
+            else:
+                self._abort()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._upstream, name)
@@ -295,7 +316,7 @@ def _dispatched_requests_send(req_session: Any, prepared_request: Any, **kwargs:
         body_bytes=body_bytes,
     )
 
-    matched = session._match_replay_or_none(recorded_req)
+    matched, slot_owned = session._match_or_acquire_slot(recorded_req)
     if matched is not None:
         interaction = matched
         delay_s = (
@@ -317,83 +338,90 @@ def _dispatched_requests_send(req_session: Any, prepared_request: Any, **kwargs:
             chunk_delay_s=chunk_delay_s,
         )
 
-    start = time.perf_counter()
-    reentrancy_token = _in_requests_send.set(True)
+    slot_for_call = slot_owned
     try:
-        response = orig(req_session, prepared_request, **kwargs)
-    finally:
-        _in_requests_send.reset(reentrancy_token)
+        start = time.perf_counter()
+        reentrancy_token = _in_requests_send.set(True)
+        try:
+            response = orig(req_session, prepared_request, **kwargs)
+        finally:
+            _in_requests_send.reset(reentrancy_token)
 
-    content_type = str(response.headers.get("content-type", "")).lower()
-    is_sse = any(ct in content_type for ct in _SSE_CONTENT_TYPES)
+        content_type = str(response.headers.get("content-type", "")).lower()
+        is_sse = any(ct in content_type for ct in _SSE_CONTENT_TYPES)
 
-    if (
-        stream
-        and response.status_code < 400
-        and getattr(response, "raw", None) is not None
-        and not getattr(response, "_content_consumed", False)
-        and (is_sse or hasattr(response.raw, "stream"))
-    ):
+        if (
+            stream
+            and response.status_code < 400
+            and getattr(response, "raw", None) is not None
+            and not getattr(response, "_content_consumed", False)
+            and (is_sse or hasattr(response.raw, "stream"))
+        ):
+            resp_headers_items = list(response.headers.items())
+            resp_status = int(response.status_code)
+
+            def on_complete_sse(chunks: list[str]) -> None:
+                latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
+                session._record_interaction_parts(
+                    recorded_req=recorded_req,
+                    status_code=resp_status,
+                    response_headers=resp_headers_items,
+                    response_bytes=None,
+                    latency_ms=latency_ms,
+                    stream_chunks=chunks,
+                    release_slot=slot_for_call,
+                )
+
+            def on_complete_bytes(data: bytes) -> None:
+                latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
+                session._record_interaction_parts(
+                    recorded_req=recorded_req,
+                    status_code=resp_status,
+                    response_headers=resp_headers_items,
+                    response_bytes=data,
+                    latency_ms=latency_ms,
+                    release_slot=slot_for_call,
+                )
+
+            response.raw = _RecordingRequestsRaw(
+                response.raw,
+                is_sse=is_sse,
+                on_complete_sse=on_complete_sse,
+                on_complete_bytes=on_complete_bytes,
+                on_abort=session._release_recording_slot if slot_for_call else None,
+            )
+            slot_owned = False
+            return response
+
+        raw_content: bytes = response.content
+        latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
         resp_headers_items = list(response.headers.items())
-        resp_status = int(response.status_code)
-
-        def on_complete_sse(chunks: list[str]) -> None:
-            latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
+        slot_owned = False
+        if is_sse and response.status_code < 400:
+            decoded_text = raw_content.decode("utf-8", errors="replace")
+            sse_chunks = split_sse_chunks(decoded_text)
             session._record_interaction_parts(
                 recorded_req=recorded_req,
-                status_code=resp_status,
+                status_code=int(response.status_code),
                 response_headers=resp_headers_items,
                 response_bytes=None,
                 latency_ms=latency_ms,
-                stream_chunks=chunks,
+                stream_chunks=sse_chunks,
+                release_slot=slot_for_call,
             )
-
-        def on_complete_bytes(data: bytes) -> None:
-            latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
+        else:
             session._record_interaction_parts(
                 recorded_req=recorded_req,
-                status_code=resp_status,
+                status_code=int(response.status_code),
                 response_headers=resp_headers_items,
-                response_bytes=data,
+                response_bytes=raw_content,
                 latency_ms=latency_ms,
+                release_slot=slot_for_call,
             )
-
-        response.raw = _RecordingRequestsRaw(
-            response.raw,
-            is_sse=is_sse,
-            on_complete_sse=on_complete_sse,
-            on_complete_bytes=on_complete_bytes,
-        )
         return response
-
-    raw_content: bytes = response.content
-    latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
-    resp_headers_items = list(response.headers.items())
-    if is_sse and response.status_code < 400:
-        decoded_text = raw_content.decode("utf-8", errors="replace")
-        parts = decoded_text.split("\n\n")
-        sse_chunks = [
-            f"{p}\n\n" if i < len(parts) - 1 else p
-            for i, p in enumerate(parts)
-            if p or i < len(parts) - 1
-        ]
-        session._record_interaction_parts(
-            recorded_req=recorded_req,
-            status_code=int(response.status_code),
-            response_headers=resp_headers_items,
-            response_bytes=None,
-            latency_ms=latency_ms,
-            stream_chunks=sse_chunks,
-        )
-    else:
-        session._record_interaction_parts(
-            recorded_req=recorded_req,
-            status_code=int(response.status_code),
-            response_headers=resp_headers_items,
-            response_bytes=raw_content,
-            latency_ms=latency_ms,
-        )
-    return response
+    finally:
+        if slot_owned:
+            session._release_recording_slot()
 
 
 def acquire_requests_patch(get_active_session: Callable[[], TapeSession | None]) -> bool:

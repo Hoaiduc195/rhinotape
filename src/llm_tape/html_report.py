@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import html
 import json
+import math
 from collections.abc import Sequence
 from typing import Any
 
 from llm_tape.cassette import Cassette
 from llm_tape.models import Interaction
+
+_MAX_SEARCH_CHARS = 2000
 
 _BASE_CSS = """
 :root { color-scheme: light dark; --bg: #0f172a; --card: #1e293b; --fg: #e2e8f0;
@@ -67,6 +70,32 @@ _FILTER_JS = """
 """
 
 
+def _truncate_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    return f"{text[:max_chars]}\n... [truncated {omitted} chars]"
+
+
+def _join_chunks_bounded(chunks: tuple[str, ...], max_chars: int) -> str:
+    total_len = sum(len(c) for c in chunks)
+    if total_len <= max_chars:
+        return "".join(chunks)
+    collected: list[str] = []
+    remaining = max_chars
+    for c in chunks:
+        if remaining <= 0:
+            break
+        if len(c) <= remaining:
+            collected.append(c)
+            remaining -= len(c)
+        else:
+            collected.append(c[:remaining])
+            remaining = 0
+    omitted = total_len - max_chars
+    return f"{''.join(collected)}\n... [truncated {omitted} chars]"
+
+
 def _fmt_body(body: Any) -> str:
     if body is None:
         return ""
@@ -76,53 +105,78 @@ def _fmt_body(body: Any) -> str:
 
 
 def _render_interaction_card(
-    cassette_name: str, idx: int, inter: Interaction, max_latency: float
+    cassette_name: str,
+    idx: int,
+    inter: Interaction,
+    max_latency: float,
+    *,
+    show_cassette_badge: bool = False,
+    max_body_chars: int = 50000,
 ) -> str:
     status = inter.response.status_code
     status_cls = "ok" if status < 400 else "err"
-    pct = min(100.0, (inter.latency_ms / max_latency) * 100.0) if max_latency > 0 else 0.0
+    safe_lat = (
+        inter.latency_ms if (math.isfinite(inter.latency_ms) and inter.latency_ms > 0.0) else 0.0
+    )
+    if safe_lat > 0.0 and math.isfinite(max_latency) and max_latency > 0.0:
+        pct = max(0.0, min(100.0, (safe_lat / max_latency) * 100.0))
+    else:
+        pct = 0.0
+    lat_label = f"{inter.latency_ms:.1f}ms" if math.isfinite(inter.latency_ms) else "n/a"
     provider = html.escape(inter.llm.provider)
     model = html.escape(inter.llm.model or "-")
     url = html.escape(inter.request.url)
     method = html.escape(inter.request.method)
+    cassette_badge = (
+        f"<span class='badge'>{html.escape(cassette_name)}</span>" if show_cassette_badge else ""
+    )
     stream_badge = "<span class='badge'>SSE</span>" if inter.llm.is_stream else ""
-    tools_str = html.escape(", ".join(tc.name for tc in inter.llm.tool_calls))
+    raw_tools = ", ".join(tc.name for tc in inter.llm.tool_calls)
 
     details: list[str] = []
     if inter.llm.thinking:
-        details.append(f"<strong>Thinking</strong><pre>{html.escape(inter.llm.thinking)}</pre>")
+        thinking_txt = _truncate_text(inter.llm.thinking, max_body_chars)
+        details.append(f"<strong>Thinking</strong><pre>{html.escape(thinking_txt)}</pre>")
     if inter.llm.text:
-        details.append(f"<strong>Response Text</strong><pre>{html.escape(inter.llm.text)}</pre>")
+        resp_txt = _truncate_text(inter.llm.text, max_body_chars)
+        details.append(f"<strong>Response Text</strong><pre>{html.escape(resp_txt)}</pre>")
     if inter.llm.tool_calls:
-        tc_json = json.dumps([tc.to_dict() for tc in inter.llm.tool_calls], indent=2)
+        tc_json = _truncate_text(
+            json.dumps([tc.to_dict() for tc in inter.llm.tool_calls], indent=2),
+            max_body_chars,
+        )
         details.append(f"<strong>Tool Calls</strong><pre>{html.escape(tc_json)}</pre>")
     req_str = _fmt_body(inter.request.body)
     if req_str:
-        details.append(f"<strong>Request Body</strong><pre>{html.escape(req_str)}</pre>")
+        req_txt = _truncate_text(req_str, max_body_chars)
+        details.append(f"<strong>Request Body</strong><pre>{html.escape(req_txt)}</pre>")
     if inter.response.stream_chunks is not None:
+        stream_txt = _join_chunks_bounded(inter.response.stream_chunks, max_body_chars)
         details.append(
             f"<strong>Stream ({len(inter.response.stream_chunks)} chunks)</strong>"
-            f"<pre>{html.escape(''.join(inter.response.stream_chunks))}</pre>"
+            f"<pre>{html.escape(stream_txt)}</pre>"
         )
     else:
         resp_str = _fmt_body(inter.response.body)
         if resp_str:
-            details.append(f"<strong>Response Body</strong><pre>{html.escape(resp_str)}</pre>")
+            resp_body_txt = _truncate_text(resp_str, max_body_chars)
+            details.append(f"<strong>Response Body</strong><pre>{html.escape(resp_body_txt)}</pre>")
 
-    search_blob = html.escape(
+    raw_search = (
         f"{cassette_name} {inter.llm.provider} {inter.llm.model or ''} "
-        f"{inter.request.url} {tools_str} {inter.llm.text}".lower(),
-        quote=True,
-    )
+        f"{inter.request.url} {raw_tools} {inter.llm.text[:_MAX_SEARCH_CHARS]}"
+    ).lower()[:_MAX_SEARCH_CHARS]
+    search_blob = html.escape(raw_search, quote=True)
     return (
         f"<div class='card' data-provider='{provider}' data-status='{status}' "
         f"data-search='{search_blob}'>"
         f"<details><summary>"
+        f"{cassette_badge}"
         f"<span class='badge {status_cls}'>{status}</span>"
         f"<span class='badge'>{provider}</span>"
         f"<span class='badge'>{model}</span>{stream_badge}"
         f"<strong>[{idx}] {method} {url}</strong> "
-        f"<span style='color:var(--muted)'>({inter.latency_ms:.1f}ms | "
+        f"<span style='color:var(--muted)'>({lat_label} | "
         f"{inter.llm.usage.total_tokens} tok | ${inter.llm.estimated_cost_usd:.6f})</span>"
         f"</summary>"
         f"<div class='bar-wrap'><div class='bar' style='width:{pct:.1f}%'></div></div>"
@@ -131,8 +185,19 @@ def _render_interaction_card(
     )
 
 
-def render_html_report(cassettes: Sequence[Cassette], *, title: str = "llm-tape Trace") -> str:
+def render_html_report(
+    cassettes: Sequence[Cassette],
+    *,
+    title: str = "llm-tape Trace",
+    max_body_chars: int = 50000,
+) -> str:
     """Render one or more cassettes into a self-contained HTML report."""
+    if (
+        isinstance(max_body_chars, bool)
+        or not isinstance(max_body_chars, int)
+        or max_body_chars < 0
+    ):
+        raise ValueError("max_body_chars must be an integer >= 0")
     all_interactions = [
         (c.path.name, idx, inter)
         for c in cassettes
@@ -142,9 +207,22 @@ def render_html_report(cassettes: Sequence[Cassette], *, title: str = "llm-tape 
     total_tokens = sum(inter.llm.usage.total_tokens for _, _, inter in all_interactions)
     total_cached = sum(inter.llm.usage.cached_input_tokens for _, _, inter in all_interactions)
     total_reasoning = sum(inter.llm.usage.reasoning_tokens for _, _, inter in all_interactions)
-    total_cost = round(sum(inter.llm.estimated_cost_usd for _, _, inter in all_interactions), 8)
-    total_latency = round(sum(inter.latency_ms for _, _, inter in all_interactions), 1)
-    max_latency = max((inter.latency_ms for _, _, inter in all_interactions), default=0.0)
+    total_cost = round(
+        sum(
+            inter.llm.estimated_cost_usd
+            for _, _, inter in all_interactions
+            if math.isfinite(inter.llm.estimated_cost_usd)
+        ),
+        8,
+    )
+    valid_latencies = [
+        inter.latency_ms
+        for _, _, inter in all_interactions
+        if math.isfinite(inter.latency_ms) and inter.latency_ms > 0.0
+    ]
+    total_latency = round(sum(valid_latencies), 1)
+    max_latency = max(valid_latencies, default=0.0)
+    show_cassette_badge = len(cassettes) > 1
 
     providers = sorted({inter.llm.provider for _, _, inter in all_interactions})
     prov_opts = "".join(
@@ -160,7 +238,14 @@ def render_html_report(cassettes: Sequence[Cassette], *, title: str = "llm-tape 
     )
 
     cards_html = "\n".join(
-        _render_interaction_card(cname, idx, inter, max_latency)
+        _render_interaction_card(
+            cname,
+            idx,
+            inter,
+            max_latency,
+            show_cassette_badge=show_cassette_badge,
+            max_body_chars=max_body_chars,
+        )
         for cname, idx, inter in all_interactions
     )
 

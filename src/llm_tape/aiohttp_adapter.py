@@ -302,13 +302,16 @@ class _RecordingAiohttpStreamReader:
         self,
         upstream: Any,
         on_complete: Callable[[list[str]], None],
+        *,
+        on_abort: Callable[[], None] | None = None,
     ) -> None:
         self._upstream = upstream
         self._on_complete = on_complete
+        self._on_abort = on_abort
         self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._chunks: list[str] = []
         self._reached_eof = False
-        self._committed = False
+        self._settled = False
 
     def _record_bytes(self, data: bytes) -> None:
         if data:
@@ -322,14 +325,24 @@ class _RecordingAiohttpStreamReader:
             if tail:
                 self._chunks.append(tail)
             self._reached_eof = True
-        if not self._committed:
-            self._committed = True
+        if not self._settled:
+            self._settled = True
             self._on_complete(self._chunks)
+
+    def _abort(self) -> None:
+        if not self._settled:
+            self._settled = True
+            if self._on_abort is not None:
+                self._on_abort()
 
     async def read(self, n: int = -1) -> bytes:
         if n == 0:
             return b""
-        data: bytes = await self._upstream.read(n)
+        try:
+            data: bytes = await self._upstream.read(n)
+        except BaseException:
+            self._abort()
+            raise
         if data:
             self._record_bytes(data)
             if n < 0:
@@ -339,7 +352,11 @@ class _RecordingAiohttpStreamReader:
         return data
 
     async def readline(self) -> bytes:
-        line: bytes = await self._upstream.readline()
+        try:
+            line: bytes = await self._upstream.readline()
+        except BaseException:
+            self._abort()
+            raise
         if line:
             self._record_bytes(line)
         else:
@@ -347,19 +364,31 @@ class _RecordingAiohttpStreamReader:
         return line
 
     async def iter_any(self) -> AsyncIterator[bytes]:
-        async for chunk in self._upstream.iter_any():
-            self._record_bytes(chunk)
-            yield chunk
-        self._finish()
+        try:
+            async for chunk in self._upstream.iter_any():
+                self._record_bytes(chunk)
+                yield chunk
+            self._finish()
+        except BaseException:
+            self._abort()
+            raise
 
     async def iter_chunked(self, n: int) -> AsyncIterator[bytes]:
-        async for chunk in self._upstream.iter_chunked(n):
-            self._record_bytes(chunk)
-            yield chunk
-        self._finish()
+        try:
+            async for chunk in self._upstream.iter_chunked(n):
+                self._record_bytes(chunk)
+                yield chunk
+            self._finish()
+        except BaseException:
+            self._abort()
+            raise
 
     async def readany(self) -> bytes:
-        data: bytes = await self._upstream.readany()
+        try:
+            data: bytes = await self._upstream.readany()
+        except BaseException:
+            self._abort()
+            raise
         if data:
             self._record_bytes(data)
         else:
@@ -367,7 +396,11 @@ class _RecordingAiohttpStreamReader:
         return data
 
     async def readchunk(self) -> tuple[bytes, bool]:
-        chunk, end_of_chunk = await self._upstream.readchunk()
+        try:
+            chunk, end_of_chunk = await self._upstream.readchunk()
+        except BaseException:
+            self._abort()
+            raise
         if chunk:
             self._record_bytes(chunk)
         else:
@@ -375,19 +408,27 @@ class _RecordingAiohttpStreamReader:
         return (chunk, end_of_chunk)
 
     async def iter_chunks(self) -> AsyncIterator[tuple[bytes, bool]]:
-        async for chunk, end_of_chunk in self._upstream.iter_chunks():
-            self._record_bytes(chunk)
-            yield (chunk, end_of_chunk)
-        self._finish()
+        try:
+            async for chunk, end_of_chunk in self._upstream.iter_chunks():
+                self._record_bytes(chunk)
+                yield (chunk, end_of_chunk)
+            self._finish()
+        except BaseException:
+            self._abort()
+            raise
 
     def __aiter__(self) -> AsyncIterator[bytes]:
         return self._iter_lines()
 
     async def _iter_lines(self) -> AsyncIterator[bytes]:
-        async for line in self._upstream:
-            self._record_bytes(line)
-            yield line
-        self._finish()
+        try:
+            async for line in self._upstream:
+                self._record_bytes(line)
+                yield line
+            self._finish()
+        except BaseException:
+            self._abort()
+            raise
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._upstream, name)
@@ -431,7 +472,7 @@ async def _dispatched_aiohttp_request(
         body_bytes=body_bytes,
     )
 
-    matched = session._match_replay_or_none(recorded_req)
+    matched, slot_owned = session._match_or_acquire_slot(recorded_req)
     if matched is not None:
         interaction = matched
         delay_s = (
@@ -460,44 +501,87 @@ async def _dispatched_aiohttp_request(
             replay_resp.raise_for_status()
         return replay_resp
 
-    start = time.perf_counter()
-    token = _in_aiohttp_request.set(True)
+    slot_for_call = slot_owned
     try:
-        response = await orig(client_session, method, str_or_url, **kwargs)
-    finally:
-        _in_aiohttp_request.reset(token)
+        start = time.perf_counter()
+        token = _in_aiohttp_request.set(True)
+        try:
+            response = await orig(client_session, method, str_or_url, **kwargs)
+        finally:
+            _in_aiohttp_request.reset(token)
 
-    content_type = str(response.headers.get("Content-Type", "")).lower()
-    is_sse = any(ct in content_type for ct in _SSE_CONTENT_TYPES)
+        content_type = str(response.headers.get("Content-Type", "")).lower()
+        is_sse = any(ct in content_type for ct in _SSE_CONTENT_TYPES)
 
-    if is_sse and response.status < 400 and getattr(response, "content", None) is not None:
-        resp_headers_items = list(response.headers.items())
-        resp_status = int(response.status)
+        if is_sse and response.status < 400 and getattr(response, "content", None) is not None:
+            resp_headers_items = list(response.headers.items())
+            resp_status = int(response.status)
 
-        def on_complete(chunks: list[str]) -> None:
-            latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
-            session._record_interaction_parts(
-                recorded_req=recorded_req,
-                status_code=resp_status,
-                response_headers=resp_headers_items,
-                response_bytes=None,
-                latency_ms=latency_ms,
-                stream_chunks=chunks,
+            def on_complete(chunks: list[str]) -> None:
+                latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
+                session._record_interaction_parts(
+                    recorded_req=recorded_req,
+                    status_code=resp_status,
+                    response_headers=resp_headers_items,
+                    response_bytes=None,
+                    latency_ms=latency_ms,
+                    stream_chunks=chunks,
+                    release_slot=slot_for_call,
+                )
+
+            reader = _RecordingAiohttpStreamReader(
+                response.content,
+                on_complete,
+                on_abort=session._release_recording_slot if slot_for_call else None,
             )
+            response.content = reader
 
-        response.content = _RecordingAiohttpStreamReader(response.content, on_complete)
+            orig_release = getattr(response, "release", None)
+            if callable(orig_release):
+
+                def _wrapped_release() -> Any:
+                    try:
+                        return orig_release()
+                    finally:
+                        if reader._reached_eof:
+                            reader._finish()
+                        else:
+                            reader._abort()
+
+                response.release = _wrapped_release
+
+            orig_close = getattr(response, "close", None)
+            if callable(orig_close):
+
+                def _wrapped_close() -> None:
+                    try:
+                        orig_close()
+                    finally:
+                        if reader._reached_eof:
+                            reader._finish()
+                        else:
+                            reader._abort()
+
+                response.close = _wrapped_close
+
+            slot_owned = False
+            return response
+
+        raw_bytes: bytes = await response.read()
+        latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
+        slot_owned = False
+        session._record_interaction_parts(
+            recorded_req=recorded_req,
+            status_code=int(response.status),
+            response_headers=list(response.headers.items()),
+            response_bytes=raw_bytes,
+            latency_ms=latency_ms,
+            release_slot=slot_for_call,
+        )
         return response
-
-    raw_bytes: bytes = await response.read()
-    latency_ms = round((time.perf_counter() - start) * 1000.0, 2)
-    session._record_interaction_parts(
-        recorded_req=recorded_req,
-        status_code=int(response.status),
-        response_headers=list(response.headers.items()),
-        response_bytes=raw_bytes,
-        latency_ms=latency_ms,
-    )
-    return response
+    finally:
+        if slot_owned:
+            session._release_recording_slot()
 
 
 def acquire_aiohttp_patch(get_active_session: Callable[[], TapeSession | None]) -> bool:

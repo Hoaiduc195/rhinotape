@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+import llm_tape.cassette as _cassette_mod
 from llm_tape._version import __version__
 from llm_tape.aiohttp_adapter import acquire_aiohttp_patch, release_aiohttp_patch
 from llm_tape.cassette import Cassette
@@ -36,7 +37,7 @@ from llm_tape.models import (
     UnmatchedRequestError,
     Usage,
 )
-from llm_tape.parsers import parse_llm_interaction, split_sse_chunks
+from llm_tape.parsers import parse_llm_interaction, redact_stream_chunks
 from llm_tape.pricing import ModelPrice
 from llm_tape.requests_adapter import acquire_requests_patch, release_requests_patch
 from llm_tape.scrubbing import (
@@ -49,7 +50,6 @@ from llm_tape.scrubbing import (
     fingerprint_request,
     format_request_diff,
     redact_body,
-    redact_text,
     resolve_pii_patterns,
     scrub_headers,
     scrub_url,
@@ -209,54 +209,81 @@ def _release_httpx_patch() -> None:
 # --- Streaming Content Decompression & ByteStream wrappers -----------------
 
 
-class _StreamContentDecoder:
-    """Incrementally decompresses gzip/deflate/br/zstd stream chunks for recording."""
+class _SingleLayerDecoder:
+    """Single-layer incremental decompressor with output cap and graceful error fallback."""
 
-    def __init__(self, content_encoding: str) -> None:
-        enc = content_encoding.strip().lower()
+    def __init__(self, encoding: str, *, max_bytes: int) -> None:
+        self._max_bytes = max_bytes
+        self._emitted_bytes = 0
         self._mode = "identity"
         self._zlib_obj: Any = None
         self._brotli_obj: Any = None
+        self._zstd_obj: Any = None
         self._deflate_pending: bytearray | None = None
-        if enc in {"gzip", "x-gzip"}:
+
+        if encoding in {"gzip", "x-gzip"}:
             self._mode = "zlib"
             self._zlib_obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
-        elif enc == "deflate":
+        elif encoding == "deflate":
             self._mode = "zlib"
             self._deflate_pending = bytearray()
-        elif enc == "br":
-            try:
-                import brotli  # type: ignore[import-not-found]
+        elif encoding == "br":
+            import brotli  # type: ignore[import-not-found]
 
-                self._mode = "brotli"
-                self._brotli_obj = brotli.Decompressor()
-            except ImportError:
-                self._mode = "identity"
-        elif enc == "zstd":
-            try:
-                import zstandard  # type: ignore[import-not-found]
+            self._mode = "brotli"
+            self._brotli_obj = brotli.Decompressor()
+        elif encoding == "zstd":
+            import zstandard  # type: ignore[import-not-found]
 
-                self._mode = "zstd"
-                self._zstd_obj: Any = zstandard.ZstdDecompressor().decompressobj()
-            except ImportError:
-                self._mode = "identity"
+            self._mode = "zstd"
+            self._zstd_obj = zstandard.ZstdDecompressor().decompressobj()
+
+    def _enforce_cap(self, count: int) -> None:
+        self._emitted_bytes += count
+        if self._emitted_bytes > self._max_bytes:
+            raise TapeError(
+                f"Decompressed stream exceeds maximum allowed size ({self._max_bytes} bytes)."
+            )
+
+    def _zlib_decompress_bounded(self, obj: Any, data: bytes) -> bytes:
+        parts: list[bytes] = []
+        buf = data
+        while buf:
+            allow = (self._max_bytes - self._emitted_bytes) + 1
+            piece = bytes(obj.decompress(buf, allow))
+            self._enforce_cap(len(piece))
+            if piece:
+                parts.append(piece)
+            buf = obj.unconsumed_tail
+        return b"".join(parts)
 
     def _init_deflate(self, data: bytes) -> bytes:
         self._deflate_pending = None
+        saved_emitted = self._emitted_bytes
         try:
             obj = zlib.decompressobj(zlib.MAX_WBITS)
-            out = obj.decompress(data)
+            out = self._zlib_decompress_bounded(obj, data)
             self._zlib_obj = obj
-            return bytes(out)
+            return out
         except zlib.error:
-            # Fallback to raw deflate (RFC 1951 without zlib wrapper)
+            self._emitted_bytes = saved_emitted
+        try:
             obj = zlib.decompressobj(-zlib.MAX_WBITS)
-            out = obj.decompress(data)
+            out = self._zlib_decompress_bounded(obj, data)
             self._zlib_obj = obj
-            return bytes(out)
+            return out
+        except zlib.error:
+            self._emitted_bytes = saved_emitted
+            self._mode = "identity"
+            self._zlib_obj = None
+            self._enforce_cap(len(data))
+            return data
 
     def decompress(self, chunk: bytes) -> bytes:
-        if not chunk or self._mode == "identity":
+        if not chunk:
+            return b""
+        if self._mode == "identity":
+            self._enforce_cap(len(chunk))
             return chunk
         if self._mode == "zlib":
             if self._deflate_pending is not None:
@@ -264,11 +291,39 @@ class _StreamContentDecoder:
                 if len(self._deflate_pending) < 2:
                     return b""
                 return self._init_deflate(bytes(self._deflate_pending))
-            return bytes(self._zlib_obj.decompress(chunk))
+            try:
+                return self._zlib_decompress_bounded(self._zlib_obj, chunk)
+            except (zlib.error, EOFError):
+                self._mode = "identity"
+                self._zlib_obj = None
+                self._enforce_cap(len(chunk))
+                return chunk
         if self._mode == "brotli":
-            return bytes(self._brotli_obj.process(chunk))
+            try:
+                out = bytes(self._brotli_obj.process(chunk))
+            except Exception as exc:
+                if isinstance(exc, TapeError):
+                    raise
+                self._mode = "identity"
+                self._brotli_obj = None
+                self._enforce_cap(len(chunk))
+                return chunk
+            self._enforce_cap(len(out))
+            return out
         if self._mode == "zstd":
-            return bytes(self._zstd_obj.decompress(chunk))
+            try:
+                allow = (self._max_bytes - self._emitted_bytes) + 1
+                out = bytes(self._zstd_obj.decompress(chunk, max_output_size=allow))
+            except Exception as exc:
+                if isinstance(exc, TapeError):
+                    raise
+                self._mode = "identity"
+                self._zstd_obj = None
+                self._enforce_cap(len(chunk))
+                return chunk
+            self._enforce_cap(len(out))
+            return out
+        self._enforce_cap(len(chunk))
         return chunk
 
     def flush(self) -> bytes:
@@ -278,11 +333,97 @@ class _StreamContentDecoder:
                     self._deflate_pending = None
                     return b""
                 out = self._init_deflate(bytes(self._deflate_pending))
-                return out + bytes(self._zlib_obj.flush())
-            return bytes(self._zlib_obj.flush())
-        if self._mode == "zstd":
-            return bytes(self._zstd_obj.flush())
+                if self._zlib_obj is not None:
+                    try:
+                        tail = bytes(self._zlib_obj.flush())
+                    except (zlib.error, EOFError):
+                        self._mode = "identity"
+                        self._zlib_obj = None
+                        return out
+                    self._enforce_cap(len(tail))
+                    return out + tail
+                return out
+            if self._zlib_obj is not None:
+                try:
+                    tail = bytes(self._zlib_obj.flush())
+                except (zlib.error, EOFError):
+                    self._mode = "identity"
+                    self._zlib_obj = None
+                    return b""
+                self._enforce_cap(len(tail))
+                return tail
+            return b""
+        if self._mode == "zstd" and self._zstd_obj is not None:
+            try:
+                tail = bytes(self._zstd_obj.flush())
+            except Exception as exc:
+                if isinstance(exc, TapeError):
+                    raise
+                self._mode = "identity"
+                self._zstd_obj = None
+                return b""
+            self._enforce_cap(len(tail))
+            return tail
         return b""
+
+
+def _is_encoding_supported(enc: str) -> bool:
+    if enc in {"gzip", "x-gzip", "deflate"}:
+        return True
+    if enc == "br":
+        try:
+            import brotli  # noqa: F401
+        except ImportError:
+            return False
+        return True
+    if enc == "zstd":
+        try:
+            import zstandard  # noqa: F401
+        except ImportError:
+            return False
+        return True
+    return False
+
+
+class _StreamContentDecoder:
+    """Incrementally decompresses gzip/deflate/br/zstd stream chunks for recording."""
+
+    def __init__(self, content_encoding: str, *, max_bytes: int | None = None) -> None:
+        limit = _cassette_mod.MAX_CASSETTE_BYTES if max_bytes is None else max_bytes
+        self._max_bytes = limit
+        self._identity_bytes = 0
+        self._layers: list[_SingleLayerDecoder] = []
+        raw_tokens = [t.strip().lower() for t in content_encoding.split(",") if t.strip()]
+        for tok in reversed(raw_tokens):
+            if tok == "identity":
+                continue
+            if not _is_encoding_supported(tok):
+                break
+            self._layers.append(_SingleLayerDecoder(tok, max_bytes=limit))
+
+    def decompress(self, chunk: bytes) -> bytes:
+        if not chunk:
+            return b""
+        if not self._layers:
+            self._identity_bytes += len(chunk)
+            if self._identity_bytes > self._max_bytes:
+                raise TapeError(
+                    f"Decompressed stream exceeds maximum allowed size ({self._max_bytes} bytes)."
+                )
+            return chunk
+        data = chunk
+        for layer in self._layers:
+            data = layer.decompress(data)
+        return data
+
+    def flush(self) -> bytes:
+        if not self._layers:
+            return b""
+        carry = b""
+        for layer in self._layers:
+            piece = layer.decompress(carry) if carry else b""
+            carry = piece + layer.flush()
+        return carry
 
 
 class _ReplayByteStream(httpx.SyncByteStream, httpx.AsyncByteStream):
@@ -328,29 +469,35 @@ class _RecordingSyncStream(httpx.SyncByteStream):
         upstream_stream: httpx.SyncByteStream,
         on_complete: Callable[[list[str]], None],
         *,
+        on_abort: Callable[[], None] | None = None,
         content_encoding: str = "",
     ) -> None:
         self._upstream = upstream_stream
         self._on_complete = on_complete
+        self._on_abort = on_abort
         self._content_decoder = _StreamContentDecoder(content_encoding)
         self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._chunks: list[str] = []
         self._reached_eof = False
-        self._committed = False
+        self._settled = False
 
     def __iter__(self) -> Iterator[bytes]:
-        for chunk in self._upstream:
-            decoded_bytes = self._content_decoder.decompress(chunk)
-            text = self._utf8_decoder.decode(decoded_bytes, final=False)
-            if text:
-                self._chunks.append(text)
-            yield chunk
-        flushed = self._content_decoder.flush()
-        tail = self._utf8_decoder.decode(flushed, final=True)
-        if tail:
-            self._chunks.append(tail)
-        self._reached_eof = True
-        self._commit()
+        try:
+            for chunk in self._upstream:
+                decoded_bytes = self._content_decoder.decompress(chunk)
+                text = self._utf8_decoder.decode(decoded_bytes, final=False)
+                if text:
+                    self._chunks.append(text)
+                yield chunk
+            flushed = self._content_decoder.flush()
+            tail = self._utf8_decoder.decode(flushed, final=True)
+            if tail:
+                self._chunks.append(tail)
+            self._reached_eof = True
+            self._commit()
+        except BaseException:
+            self._abort()
+            raise
 
     def close(self) -> None:
         try:
@@ -358,11 +505,19 @@ class _RecordingSyncStream(httpx.SyncByteStream):
         finally:
             if self._reached_eof:
                 self._commit()
+            else:
+                self._abort()
 
     def _commit(self) -> None:
-        if not self._committed:
-            self._committed = True
+        if not self._settled:
+            self._settled = True
             self._on_complete(self._chunks)
+
+    def _abort(self) -> None:
+        if not self._settled:
+            self._settled = True
+            if self._on_abort is not None:
+                self._on_abort()
 
 
 class _RecordingAsyncStream(httpx.AsyncByteStream):
@@ -373,29 +528,35 @@ class _RecordingAsyncStream(httpx.AsyncByteStream):
         upstream_stream: httpx.AsyncByteStream,
         on_complete: Callable[[list[str]], None],
         *,
+        on_abort: Callable[[], None] | None = None,
         content_encoding: str = "",
     ) -> None:
         self._upstream = upstream_stream
         self._on_complete = on_complete
+        self._on_abort = on_abort
         self._content_decoder = _StreamContentDecoder(content_encoding)
         self._utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._chunks: list[str] = []
         self._reached_eof = False
-        self._committed = False
+        self._settled = False
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
-        async for chunk in self._upstream:
-            decoded_bytes = self._content_decoder.decompress(chunk)
-            text = self._utf8_decoder.decode(decoded_bytes, final=False)
-            if text:
-                self._chunks.append(text)
-            yield chunk
-        flushed = self._content_decoder.flush()
-        tail = self._utf8_decoder.decode(flushed, final=True)
-        if tail:
-            self._chunks.append(tail)
-        self._reached_eof = True
-        self._commit()
+        try:
+            async for chunk in self._upstream:
+                decoded_bytes = self._content_decoder.decompress(chunk)
+                text = self._utf8_decoder.decode(decoded_bytes, final=False)
+                if text:
+                    self._chunks.append(text)
+                yield chunk
+            flushed = self._content_decoder.flush()
+            tail = self._utf8_decoder.decode(flushed, final=True)
+            if tail:
+                self._chunks.append(tail)
+            self._reached_eof = True
+            self._commit()
+        except BaseException:
+            self._abort()
+            raise
 
     async def aclose(self) -> None:
         try:
@@ -403,11 +564,19 @@ class _RecordingAsyncStream(httpx.AsyncByteStream):
         finally:
             if self._reached_eof:
                 self._commit()
+            else:
+                self._abort()
 
     def _commit(self) -> None:
-        if not self._committed:
-            self._committed = True
+        if not self._settled:
+            self._settled = True
             self._on_complete(self._chunks)
+
+    def _abort(self) -> None:
+        if not self._settled:
+            self._settled = True
+            if self._on_abort is not None:
+                self._on_abort()
 
 
 # --- TapeSession -----------------------------------------------------------
@@ -452,11 +621,19 @@ class TapeSession:
         patch_aiohttp: bool = True,
         patch_urllib: bool = False,
     ) -> None:
-        if not math.isfinite(replay_latency_scale) or replay_latency_scale < 0.0:
+        if (
+            isinstance(replay_latency_scale, bool)
+            or not math.isfinite(replay_latency_scale)
+            or replay_latency_scale < 0.0
+        ):
             raise ValueError("replay_latency_scale must be a finite number >= 0.0")
-        if max_interactions is not None and max_interactions < 0:
+        if max_interactions is not None and (
+            isinstance(max_interactions, bool) or max_interactions < 0
+        ):
             raise ValueError("max_interactions must be >= 0")
-        if max_cost_usd is not None and (not math.isfinite(max_cost_usd) or max_cost_usd < 0.0):
+        if max_cost_usd is not None and (
+            isinstance(max_cost_usd, bool) or not math.isfinite(max_cost_usd) or max_cost_usd < 0.0
+        ):
             raise ValueError("max_cost_usd must be a finite number >= 0.0")
         self.cassette_path = Path(cassette_path)
         self.mode = TapeMode.coerce(mode)
@@ -504,6 +681,7 @@ class TapeSession:
         self._lock = threading.Lock()
         self._interactions: list[Interaction] = []
         self._recorded: list[Interaction] = []
+        self._inflight_recordings = 0
         self._existing_interactions: list[Interaction] = []
         self._existing_metadata: dict[str, Any] = {}
         self._replay_queues: dict[str, deque[tuple[int, Interaction]]] = defaultdict(deque)
@@ -525,23 +703,26 @@ class TapeSession:
     # --- Lifecycle ---------------------------------------------------------
 
     def _prepare(self) -> None:
-        if self._active:
-            raise TapeError("TapeSession is already active and cannot be re-entered concurrently.")
-        self._active = True
-        try:
-            with self._lock:
-                self._interactions.clear()
-                self._recorded.clear()
-                self._existing_interactions.clear()
-                self._existing_metadata.clear()
-                self._replay_queues.clear()
-                self._custom_replay_list.clear()
-                self._total_loaded_count = 0
-                self._consumed_indices.clear()
-                self._replay_call_seq = 0
-                self._known_fingerprints.clear()
-                self._all_loaded_requests.clear()
+        with self._lock:
+            if self._active:
+                raise TapeError(
+                    "TapeSession is already active and cannot be re-entered concurrently."
+                )
+            self._active = True
+            self._interactions.clear()
+            self._recorded.clear()
+            self._inflight_recordings = 0
+            self._existing_interactions.clear()
+            self._existing_metadata.clear()
+            self._replay_queues.clear()
+            self._custom_replay_list.clear()
+            self._total_loaded_count = 0
+            self._consumed_indices.clear()
+            self._replay_call_seq = 0
+            self._known_fingerprints.clear()
+            self._all_loaded_requests.clear()
 
+        try:
             if self.mode is TapeMode.NONE:
                 self._is_replaying = False
                 self._is_recording = False
@@ -576,7 +757,8 @@ class TapeSession:
                     self._is_replaying = False
                     self._is_recording = True
         except Exception:
-            self._active = False
+            with self._lock:
+                self._active = False
             raise
 
     def _cassette_exists(self) -> bool:
@@ -670,7 +852,9 @@ class TapeSession:
         try:
             self._uninstall_httpx_patch()
         finally:
-            self._active = False
+            with self._lock:
+                self._active = False
+                self._inflight_recordings = 0
 
         if not self._is_recording:
             return
@@ -728,7 +912,8 @@ class TapeSession:
         try:
             self._install_httpx_patch()
         except Exception:
-            self._active = False
+            with self._lock:
+                self._active = False
             raise
         return self
 
@@ -740,7 +925,8 @@ class TapeSession:
         try:
             self._install_httpx_patch()
         except Exception:
-            self._active = False
+            with self._lock:
+                self._active = False
             raise
         return self
 
@@ -913,17 +1099,27 @@ class TapeSession:
             self._interactions.append(interaction)
         return interaction
 
-    def _check_recording_guardrails(self) -> None:
-        if self.max_interactions is not None or self.max_cost_usd is not None:
-            with self._lock:
-                recorded_count = len(self._recorded)
-                recorded_cost = sum(i.llm.estimated_cost_usd for i in self._recorded)
-            if self.max_interactions is not None and recorded_count >= self.max_interactions:
+    def _check_recording_guardrails_locked(self, *, include_inflight: bool = True) -> None:
+        recorded_count = len(self._recorded)
+        active_count = recorded_count + (self._inflight_recordings if include_inflight else 0)
+        if self.max_interactions is not None and active_count >= self.max_interactions:
+            raise TapeAssertionError(
+                f"Live recording guardrail tripped: reached max_interactions="
+                f"{self.max_interactions}."
+            )
+        if self.max_cost_usd is not None:
+            if (
+                isinstance(self.max_cost_usd, bool)
+                or not math.isfinite(self.max_cost_usd)
+                or self.max_cost_usd < 0.0
+            ):
+                raise ValueError("max_cost_usd must be a finite number >= 0.0")
+            if any(not math.isfinite(i.llm.estimated_cost_usd) for i in self._recorded):
                 raise TapeAssertionError(
-                    f"Live recording guardrail tripped: reached max_interactions="
-                    f"{self.max_interactions}."
+                    "Live cost circuit-breaker tripped: observed non-finite recorded cost."
                 )
-            if self.max_cost_usd is not None and (
+            recorded_cost = sum(i.llm.estimated_cost_usd for i in self._recorded)
+            if not math.isfinite(recorded_cost) or (
                 (self.max_cost_usd == 0.0 and recorded_count > 0)
                 or (recorded_cost > 0.0 and round(recorded_cost, 8) >= self.max_cost_usd)
             ):
@@ -931,6 +1127,39 @@ class TapeSession:
                     f"Live cost circuit-breaker tripped: recorded ${recorded_cost:.6f} "
                     f"(limit: max_cost_usd=${self.max_cost_usd:.6f})."
                 )
+
+    def _check_recording_guardrails(self) -> None:
+        if self.max_interactions is not None or self.max_cost_usd is not None:
+            with self._lock:
+                self._check_recording_guardrails_locked(include_inflight=True)
+
+    def _acquire_recording_slot(self) -> bool:
+        """Atomically check recording guardrails and reserve one in-flight recording slot."""
+        if not self._is_recording:
+            return False
+        with self._lock:
+            self._check_recording_guardrails_locked(include_inflight=True)
+            self._inflight_recordings += 1
+            return True
+
+    def _release_recording_slot(self) -> None:
+        """Release a reserved in-flight recording slot without recording an interaction."""
+        with self._lock:
+            if self._inflight_recordings > 0:
+                self._inflight_recordings -= 1
+
+    def _match_or_acquire_slot(
+        self, recorded_req: RecordedRequest
+    ) -> tuple[Interaction | None, bool]:
+        """Match replay queue or atomically acquire a live recording slot."""
+        if not self._is_replaying:
+            return None, self._acquire_recording_slot()
+        if self._is_recording:
+            try:
+                return self._pop_replay_interaction(recorded_req), False
+            except UnmatchedRequestError:
+                return None, self._acquire_recording_slot()
+        return self._pop_replay_interaction(recorded_req), False
 
     def _match_replay_or_none(self, recorded_req: RecordedRequest) -> Interaction | None:
         """Return matched replay Interaction, None if recording/new_episodes miss, or raise."""
@@ -1038,96 +1267,118 @@ class TapeSession:
         response_bytes: bytes | None,
         latency_ms: float,
         stream_chunks: list[str] | None = None,
+        release_slot: bool = False,
     ) -> Interaction:
-        headers_list = list(response_headers)
-        clean_resp_headers = scrub_headers(headers_list, self.extra_sensitive_headers)
-        content_type = ""
-        for k, v in headers_list:
-            if k.lower() == "content-type":
-                content_type = v
-                break
+        slot_settled = False
+        try:
+            headers_list = list(response_headers)
+            clean_resp_headers = scrub_headers(
+                headers_list, compiled=self._compiled_sensitive_headers
+            )
+            content_type = ""
+            for k, v in headers_list:
+                if k.lower() == "content-type":
+                    content_type = v
+                    break
 
-        if stream_chunks is not None:
-            if self._compiled_redact_patterns:
-                per_chunk = [redact_text(c, self._compiled_redact_patterns) for c in stream_chunks]
-                joined_per_chunk = "".join(per_chunk)
-                joined_redacted = redact_text(
-                    "".join(stream_chunks), self._compiled_redact_patterns
+            if stream_chunks is not None:
+                chunks_tuple = tuple(
+                    redact_stream_chunks(stream_chunks, self._compiled_redact_patterns)
                 )
-                if joined_redacted != joined_per_chunk:
-                    # Secret spanned across TCP chunk boundary: re-split on SSE event boundaries
-                    stream_chunks = split_sse_chunks(joined_redacted)
+                recorded_resp = RecordedResponse(
+                    status_code=status_code,
+                    headers=clean_resp_headers,
+                    body=None,
+                    body_encoding="stream",
+                    stream_chunks=chunks_tuple,
+                )
+                llm_summary = parse_llm_interaction(
+                    url=recorded_req.url,
+                    request_body=recorded_req.body,
+                    response_body=None,
+                    custom_pricing=self.custom_pricing,
+                    stream_chunks=chunks_tuple,
+                    content_type=content_type,
+                )
+            else:
+                decoded_resp_body, resp_encoding = decode_body_with_encoding(response_bytes or b"")
+                if self._has_body_redaction and resp_encoding not in {"base64", "empty"}:
+                    decoded_resp_body = redact_body(
+                        decoded_resp_body,
+                        redact_fields=self.redact_fields,
+                        redact_patterns=self._compiled_redact_patterns,
+                        scrub_body=self.scrub_body,
+                    )
+                recorded_resp = RecordedResponse(
+                    status_code=status_code,
+                    headers=clean_resp_headers,
+                    body=decoded_resp_body,
+                    body_encoding=resp_encoding,
+                )
+                llm_summary = parse_llm_interaction(
+                    url=recorded_req.url,
+                    request_body=recorded_req.body,
+                    response_body=decoded_resp_body,
+                    custom_pricing=self.custom_pricing,
+                    content_type=content_type,
+                )
+
+            interaction = Interaction(
+                request=recorded_req,
+                response=recorded_resp,
+                latency_ms=latency_ms,
+                llm=llm_summary,
+            )
+            if self.on_record is not None:
+                transformed = self.on_record(interaction)
+                if transformed is None:
+                    return interaction
+                if not isinstance(transformed, Interaction):
+                    raise TypeError(
+                        f"on_record callback must return Interaction or None, "
+                        f"got {type(transformed).__name__}"
+                    )
+                interaction = transformed
+
+            has_nonfinite_cost = False
+            with self._lock:
+                self._interactions.append(interaction)
+                self._recorded.append(interaction)
+                if release_slot and self._inflight_recordings > 0:
+                    self._inflight_recordings -= 1
+                slot_settled = True
+                if self.max_cost_usd is not None:
+                    has_nonfinite_cost = any(
+                        not math.isfinite(i.llm.estimated_cost_usd) for i in self._recorded
+                    )
+                    recorded_cost = (
+                        float("nan")
+                        if has_nonfinite_cost
+                        else sum(i.llm.estimated_cost_usd for i in self._recorded)
+                    )
                 else:
-                    stream_chunks = per_chunk
-            chunks_tuple = tuple(stream_chunks)
-            recorded_resp = RecordedResponse(
-                status_code=status_code,
-                headers=clean_resp_headers,
-                body=None,
-                body_encoding="stream",
-                stream_chunks=chunks_tuple,
-            )
-            llm_summary = parse_llm_interaction(
-                url=recorded_req.url,
-                request_body=recorded_req.body,
-                response_body=None,
-                custom_pricing=self.custom_pricing,
-                stream_chunks=chunks_tuple,
-                content_type=content_type,
-            )
-        else:
-            decoded_resp_body, resp_encoding = decode_body_with_encoding(response_bytes or b"")
-            if self._has_body_redaction and resp_encoding not in {"base64", "empty"}:
-                decoded_resp_body = redact_body(
-                    decoded_resp_body,
-                    redact_fields=self.redact_fields,
-                    redact_patterns=self._compiled_redact_patterns,
-                    scrub_body=self.scrub_body,
-                )
-            recorded_resp = RecordedResponse(
-                status_code=status_code,
-                headers=clean_resp_headers,
-                body=decoded_resp_body,
-                body_encoding=resp_encoding,
-            )
-            llm_summary = parse_llm_interaction(
-                url=recorded_req.url,
-                request_body=recorded_req.body,
-                response_body=decoded_resp_body,
-                custom_pricing=self.custom_pricing,
-                content_type=content_type,
-            )
+                    recorded_cost = 0.0
 
-        interaction = Interaction(
-            request=recorded_req,
-            response=recorded_resp,
-            latency_ms=latency_ms,
-            llm=llm_summary,
-        )
-        if self.on_record is not None:
-            transformed = self.on_record(interaction)
-            if transformed is None:
-                return interaction
-            if not isinstance(transformed, Interaction):
-                raise TypeError(
-                    f"on_record callback must return Interaction or None, "
-                    f"got {type(transformed).__name__}"
-                )
-            interaction = transformed
-        with self._lock:
-            self._interactions.append(interaction)
-            self._recorded.append(interaction)
-            recorded_cost = (
-                sum(i.llm.estimated_cost_usd for i in self._recorded)
-                if self.max_cost_usd is not None
-                else 0.0
-            )
-        if self.max_cost_usd is not None and round(recorded_cost, 8) > self.max_cost_usd:
-            raise TapeAssertionError(
-                f"Live cost circuit-breaker tripped: recorded ${recorded_cost:.6f} "
-                f"(limit: max_cost_usd=${self.max_cost_usd:.6f})."
-            )
-        return interaction
+            if self.max_cost_usd is not None:
+                if (
+                    isinstance(self.max_cost_usd, bool)
+                    or not math.isfinite(self.max_cost_usd)
+                    or self.max_cost_usd < 0.0
+                ):
+                    raise ValueError("max_cost_usd must be a finite number >= 0.0")
+                if (
+                    has_nonfinite_cost
+                    or not math.isfinite(recorded_cost)
+                    or round(recorded_cost, 8) > self.max_cost_usd
+                ):
+                    raise TapeAssertionError(
+                        f"Live cost circuit-breaker tripped: recorded ${recorded_cost:.6f} "
+                        f"(limit: max_cost_usd=${self.max_cost_usd:.6f})."
+                    )
+            return interaction
+        finally:
+            if release_slot and not slot_settled:
+                self._release_recording_slot()
 
     def _record_interaction(
         self,
@@ -1137,6 +1388,7 @@ class TapeSession:
         latency_ms: float,
         *,
         stream_chunks: list[str] | None = None,
+        release_slot: bool = False,
     ) -> Interaction:
         return self._record_interaction_parts(
             recorded_req=recorded_req,
@@ -1145,6 +1397,7 @@ class TapeSession:
             response_bytes=response_bytes,
             latency_ms=latency_ms,
             stream_chunks=stream_chunks,
+            release_slot=release_slot,
         )
 
     def handle_sync(
@@ -1160,14 +1413,16 @@ class TapeSession:
             return sender(request)
 
         request.extensions[_HANDLED_EXT_KEY] = True
+        slot_owned = False
         try:
             body_bytes = request.read()
             recorded_req = self._build_recorded_request(request, body_bytes)
 
-            matched = self._match_replay_or_none(recorded_req)
+            matched, slot_owned = self._match_or_acquire_slot(recorded_req)
             if matched is not None:
                 return self._replay_interaction_response(request, matched, stream=stream)
 
+            slot_for_call = slot_owned
             start = time.perf_counter()
             response = sender(request)
             content_type = response.headers.get("content-type", "").lower()
@@ -1188,24 +1443,45 @@ class TapeSession:
                 def _on_complete(chunks: list[str]) -> None:
                     latency_ms = (time.perf_counter() - start) * 1000.0
                     self._record_interaction(
-                        recorded_req, response, None, latency_ms, stream_chunks=chunks
+                        recorded_req,
+                        response,
+                        None,
+                        latency_ms,
+                        stream_chunks=chunks,
+                        release_slot=slot_for_call,
                     )
 
                 assert isinstance(response.stream, httpx.SyncByteStream)
                 response.stream = _RecordingSyncStream(
-                    response.stream, _on_complete, content_encoding=content_encoding
+                    response.stream,
+                    _on_complete,
+                    on_abort=self._release_recording_slot if slot_for_call else None,
+                    content_encoding=content_encoding,
                 )
+                slot_owned = False
                 return response
 
             response_bytes = response.content if response.is_stream_consumed else response.read()
             latency_ms = (time.perf_counter() - start) * 1000.0
+            slot_owned = False
             if is_sse:
                 text_chunk = response_bytes.decode("utf-8", errors="replace")
                 self._record_interaction(
-                    recorded_req, response, None, latency_ms, stream_chunks=[text_chunk]
+                    recorded_req,
+                    response,
+                    None,
+                    latency_ms,
+                    stream_chunks=[text_chunk],
+                    release_slot=slot_for_call,
                 )
             else:
-                self._record_interaction(recorded_req, response, response_bytes, latency_ms)
+                self._record_interaction(
+                    recorded_req,
+                    response,
+                    response_bytes,
+                    latency_ms,
+                    release_slot=slot_for_call,
+                )
             if stream:
                 cleaned_headers = {
                     k: v
@@ -1220,6 +1496,8 @@ class TapeSession:
                 )
             return response
         finally:
+            if slot_owned:
+                self._release_recording_slot()
             request.extensions.pop(_HANDLED_EXT_KEY, None)
 
     async def handle_async(
@@ -1235,16 +1513,18 @@ class TapeSession:
             return await sender(request)  # type: ignore[no-any-return]
 
         request.extensions[_HANDLED_EXT_KEY] = True
+        slot_owned = False
         try:
             body_bytes = await request.aread()
             recorded_req = self._build_recorded_request(request, body_bytes)
 
-            matched = self._match_replay_or_none(recorded_req)
+            matched, slot_owned = self._match_or_acquire_slot(recorded_req)
             if matched is not None:
                 return await self._replay_interaction_response_async(
                     request, matched, stream=stream
                 )
 
+            slot_for_call = slot_owned
             start = time.perf_counter()
             response: httpx.Response = await sender(request)
             content_type = response.headers.get("content-type", "").lower()
@@ -1265,26 +1545,47 @@ class TapeSession:
                 def _on_complete(chunks: list[str]) -> None:
                     latency_ms = (time.perf_counter() - start) * 1000.0
                     self._record_interaction(
-                        recorded_req, response, None, latency_ms, stream_chunks=chunks
+                        recorded_req,
+                        response,
+                        None,
+                        latency_ms,
+                        stream_chunks=chunks,
+                        release_slot=slot_for_call,
                     )
 
                 assert isinstance(response.stream, httpx.AsyncByteStream)
                 response.stream = _RecordingAsyncStream(
-                    response.stream, _on_complete, content_encoding=content_encoding
+                    response.stream,
+                    _on_complete,
+                    on_abort=self._release_recording_slot if slot_for_call else None,
+                    content_encoding=content_encoding,
                 )
+                slot_owned = False
                 return response
 
             response_bytes = (
                 response.content if response.is_stream_consumed else await response.aread()
             )
             latency_ms = (time.perf_counter() - start) * 1000.0
+            slot_owned = False
             if is_sse:
                 text_chunk = response_bytes.decode("utf-8", errors="replace")
                 self._record_interaction(
-                    recorded_req, response, None, latency_ms, stream_chunks=[text_chunk]
+                    recorded_req,
+                    response,
+                    None,
+                    latency_ms,
+                    stream_chunks=[text_chunk],
+                    release_slot=slot_for_call,
                 )
             else:
-                self._record_interaction(recorded_req, response, response_bytes, latency_ms)
+                self._record_interaction(
+                    recorded_req,
+                    response,
+                    response_bytes,
+                    latency_ms,
+                    release_slot=slot_for_call,
+                )
             if stream:
                 cleaned_headers = {
                     k: v
@@ -1299,6 +1600,8 @@ class TapeSession:
                 )
             return response
         finally:
+            if slot_owned:
+                self._release_recording_slot()
             request.extensions.pop(_HANDLED_EXT_KEY, None)
 
     # --- Inspection properties ---------------------------------------------
@@ -1405,8 +1708,15 @@ class TapeSession:
             )
 
     def assert_cost_under(self, max_usd: float) -> None:
-        actual = self.total_cost_usd
-        if round(actual, 8) > max_usd:
+        if isinstance(max_usd, bool) or not math.isfinite(max_usd) or max_usd < 0.0:
+            raise ValueError("max_usd must be a finite number >= 0.0")
+        interactions = self.interactions
+        if any(not math.isfinite(i.llm.estimated_cost_usd) for i in interactions):
+            raise TapeAssertionError(
+                "Cost budget check failed: observed non-finite interaction cost."
+            )
+        actual = sum(i.llm.estimated_cost_usd for i in interactions)
+        if not math.isfinite(actual) or round(actual, 8) > max_usd:
             raise TapeAssertionError(
                 f"Cost budget exceeded: estimated ${actual:.6f} (limit: ${max_usd:.6f})."
             )
@@ -1558,8 +1868,17 @@ class TapeSession:
 
     def assert_max_latency_ms(self, max_ms: float) -> None:
         """Assert that no recorded/replayed call exceeded `max_ms` milliseconds."""
+        if isinstance(max_ms, bool) or not math.isfinite(max_ms) or max_ms < 0.0:
+            raise ValueError("max_ms must be a finite number >= 0.0")
         with self._lock:
-            slow = [i.latency_ms for i in self._interactions if i.latency_ms > max_ms]
+            latencies = [i.latency_ms for i in self._interactions]
+        for idx, lat in enumerate(latencies):
+            if not math.isfinite(lat):
+                raise TapeAssertionError(
+                    f"Latency budget check failed: call[{idx}] has non-finite latency "
+                    f"{lat!r}ms (limit: {max_ms:.2f}ms)."
+                )
+        slow = [lat for lat in latencies if lat > max_ms]
         if slow:
             raise TapeAssertionError(
                 f"Latency budget exceeded: slowest call took {max(slow):.2f}ms "
@@ -1617,9 +1936,19 @@ class TapeSession:
 
     def assert_max_cost_per_call(self, max_usd: float) -> None:
         """Assert that no individual LLM call exceeded `max_usd`."""
+        if isinstance(max_usd, bool) or not math.isfinite(max_usd) or max_usd < 0.0:
+            raise ValueError("max_usd must be a finite number >= 0.0")
+        interactions = self.interactions
+        for idx, inter in enumerate(interactions):
+            cost = inter.llm.estimated_cost_usd
+            if not math.isfinite(cost):
+                raise TapeAssertionError(
+                    f"Per-call cost budget check failed: call[{idx}] has non-finite cost "
+                    f"{cost!r} (limit: ${max_usd:.6f})."
+                )
         over = [
             (idx, i.llm.estimated_cost_usd)
-            for idx, i in enumerate(self.interactions)
+            for idx, i in enumerate(interactions)
             if round(i.llm.estimated_cost_usd, 8) > max_usd
         ]
         if over:

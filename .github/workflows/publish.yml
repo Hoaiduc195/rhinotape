@@ -17,6 +17,35 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
+      - name: Set up Python and install dev dependencies
+        run: uv sync --extra dev
+
+      - name: Verify release tag matches package version
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          uv run python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          text = Path("src/llm_tape/_version.py").read_text(encoding="utf-8")
+          match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+          assert match is not None, "Could not parse __version__ from src/llm_tape/_version.py"
+          pkg_version = match.group(1)
+          tag = os.environ["RELEASE_TAG"]
+          normalized_tag = tag[1:] if tag.startswith("v") else tag
+          if normalized_tag != pkg_version:
+              raise SystemExit(
+                  f"Release tag {tag!r} does not match src/llm_tape/_version.py __version__ ({pkg_version!r})."
+              )
+          print(f"Verified release tag {tag} matches __version__ == {pkg_version}")
+          PY
+
+      - name: Run test suite
+        run: uv run pytest -q -W error
+
       - name: Build wheel and sdist
         run: uv build
 

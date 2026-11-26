@@ -37,8 +37,8 @@ jobs:
 
       - name: Lint & format check with ruff
         run: |
-          uv run --python ${{ matrix.python-version }} ruff check src tests
-          uv run --python ${{ matrix.python-version }} ruff format --check src tests
+          uv run --python ${{ matrix.python-version }} ruff check src tests examples
+          uv run --python ${{ matrix.python-version }} ruff format --check src tests examples
 
       - name: Type-check with mypy
         run: uv run --python ${{ matrix.python-version }} mypy
@@ -62,5 +62,39 @@ jobs:
           uv venv --python ${{ matrix.python-version }} .tmp-no-pytest-venv
           uv pip install --python .tmp-no-pytest-venv/bin/python dist/*.whl
           .tmp-no-pytest-venv/bin/python -c "import llm_tape; print(llm_tape.__version__)"
+          .tmp-no-pytest-venv/bin/python - <<'PY'
+          import httpx
+          from llm_tape import MemoryCassetteStore, TapeMode, TapeSession
+
+          store = MemoryCassetteStore()
+          resp_payload = {
+              "model": "gpt-4o-mini",
+              "choices": [{"message": {"role": "assistant", "content": "pong"}}],
+              "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+          }
+          transport = httpx.MockTransport(lambda req: httpx.Response(200, json=resp_payload))
+          with TapeSession("smoke.tape.json", mode=TapeMode.RECORD, store=store) as rec:
+              with httpx.Client(transport=transport) as client:
+                  r = client.post(
+                      "https://api.openai.com/v1/chat/completions",
+                      json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "ping"}]},
+                  )
+                  assert r.status_code == 200
+              rec.assert_call_count(1)
+
+          with TapeSession("smoke.tape.json", mode=TapeMode.REPLAY, store=store) as rep:
+              with httpx.Client(
+                  transport=httpx.MockTransport(lambda req: httpx.Response(500))
+              ) as client:
+                  r = client.post(
+                      "https://api.openai.com/v1/chat/completions",
+                      json={"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "ping"}]},
+                  )
+                  assert r.status_code == 200
+                  assert r.json()["choices"][0]["message"]["content"] == "pong"
+              rep.assert_call_count(1)
+              rep.assert_tokens_under(50)
+          print("Offline wheel smoke test OK")
+          PY
           .tmp-no-pytest-venv/bin/llm-tape --help
           rm -rf .tmp-no-pytest-venv

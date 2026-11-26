@@ -96,6 +96,7 @@ def cassette_json_schema() -> dict[str, Any]:
                                         "output_tokens": {"type": "integer", "minimum": 0},
                                         "total_tokens": {"type": "integer", "minimum": 0},
                                         "cached_input_tokens": {"type": "integer", "minimum": 0},
+                                        "cache_creation_tokens": {"type": "integer", "minimum": 0},
                                         "reasoning_tokens": {"type": "integer", "minimum": 0},
                                     },
                                 },
@@ -245,6 +246,9 @@ class Cassette:
             "calls": len(self.interactions),
             "input_tokens": sum(i.llm.usage.input_tokens for i in self.interactions),
             "cached_input_tokens": sum(i.llm.usage.cached_input_tokens for i in self.interactions),
+            "cache_creation_tokens": sum(
+                i.llm.usage.cache_creation_tokens for i in self.interactions
+            ),
             "output_tokens": sum(i.llm.usage.output_tokens for i in self.interactions),
             "reasoning_tokens": sum(i.llm.usage.reasoning_tokens for i in self.interactions),
             "total_tokens": sum(i.llm.usage.total_tokens for i in self.interactions),
@@ -327,9 +331,13 @@ class Cassette:
     def from_json(cls, raw: str, *, path: str | Path = Path("memory.tape.json")) -> Cassette:
         """Deserialize a Cassette from a JSON string."""
         cassette_path = Path(path)
+
+        def _reject_nonfinite(constant: str) -> Any:
+            raise ValueError(f"Non-finite JSON constant {constant!r} is not allowed in cassettes")
+
         try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as exc:
+            parsed = json.loads(raw, parse_constant=_reject_nonfinite)
+        except (json.JSONDecodeError, ValueError) as exc:
             raise CorruptCassetteError(f"Failed to read cassette {cassette_path}: {exc}") from exc
 
         if not isinstance(parsed, dict):
@@ -411,19 +419,41 @@ class Cassette:
                 f"Cassette file not found: {cassette_path}. "
                 "Run with mode='once' or mode='record' first to record interactions."
             )
+        limit = MAX_CASSETTE_BYTES
         try:
-            st_size = cassette_path.stat().st_size
-            if cassette_path.suffix.lower() != ".gz" and st_size > MAX_CASSETTE_BYTES:
-                raise CorruptCassetteError(
-                    f"Cassette {cassette_path} exceeds safety size limit "
-                    f"({MAX_CASSETTE_BYTES} bytes)."
-                )
-            raw_bytes = cassette_path.read_bytes()
+            with cassette_path.open("rb") as f:
+                magic = f.read(2)
+                f.seek(0)
+                if cassette_path.suffix.lower() == ".gz" or magic == _GZIP_MAGIC:
+                    with gzip.GzipFile(fileobj=f, mode="rb") as gz:
+                        decompressed = gz.read(limit + 1)
+                    if len(decompressed) > limit:
+                        raise CorruptCassetteError(
+                            f"Decompressed cassette exceeds maximum allowed size ({limit} bytes)."
+                        )
+                    text = decompressed.decode("utf-8")
+                else:
+                    st_size = os.fstat(f.fileno()).st_size
+                    if st_size > limit:
+                        raise CorruptCassetteError(
+                            f"Cassette {cassette_path} exceeds safety size limit ({limit} bytes)."
+                        )
+                    raw_bytes = f.read(limit + 1)
+                    if len(raw_bytes) > limit:
+                        raise CorruptCassetteError(
+                            f"Cassette {cassette_path} exceeds safety size limit ({limit} bytes)."
+                        )
+                    text = raw_bytes.decode("utf-8")
         except CorruptCassetteError:
             raise
-        except OSError as exc:
+        except FileNotFoundError as exc:
+            raise TapeNotFoundError(
+                f"Cassette file not found: {cassette_path}. "
+                "Run with mode='once' or mode='record' first to record interactions."
+            ) from exc
+        except (OSError, gzip.BadGzipFile, zlib.error, EOFError, UnicodeDecodeError) as exc:
             raise CorruptCassetteError(f"Failed to read cassette {cassette_path}: {exc}") from exc
-        return cls.from_bytes(raw_bytes, path=cassette_path)
+        return cls.from_json(text, path=cassette_path)
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
