@@ -24,7 +24,14 @@ from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
 from rhinotape._version import __version__ as _VERSION
-from rhinotape.cassette import Cassette, cassette_json_schema, iter_cassette_files
+from rhinotape.cassette import (
+    MERGE_CONFLICT_STRATEGIES,
+    MERGE_DUPLICATE_STRATEGIES,
+    MERGE_SORT_KEYS,
+    Cassette,
+    cassette_json_schema,
+    iter_cassette_files,
+)
 from rhinotape.codegen import generate_pytest_code
 from rhinotape.graph import render_ascii_graph, render_mermaid_graph
 from rhinotape.models import (
@@ -2419,13 +2426,95 @@ def _cmd_schema(*, output: Path | None = None) -> int:
     return 0
 
 
+def _is_gzip_file(path: Path) -> bool:
+    if path.suffix.lower() == ".gz":
+        return True
+    try:
+        with path.open("rb") as f:
+            return f.read(2) == b"\x1f\x8b"
+    except OSError:
+        return False
+
+
 def _cmd_merge(
     sources: list[Path],
     *,
-    output: Path,
+    output: Path | None = None,
     deduplicate: bool = False,
+    on_duplicate: str | None = None,
+    sort_by: str | None = None,
+    git_driver: bool = False,
+    on_conflict: str | None = None,
 ) -> int:
-    """Merge multiple cassette files or directories into a single output cassette."""
+    """Merge multiple cassette files or directories, or run 3-way Git merge driver."""
+    if git_driver:
+        if output is not None:
+            print(
+                "Error: -o/--output cannot be combined with --git-driver "
+                "(writes in-place to <ours>).",
+                file=sys.stderr,
+            )
+            return 1
+        if deduplicate or on_duplicate is not None or sort_by is not None:
+            print(
+                "Error: --deduplicate, --on-duplicate, and --sort-by "
+                "cannot be combined with --git-driver.",
+                file=sys.stderr,
+            )
+            return 1
+        if len(sources) != 3:
+            print(
+                "Error: --git-driver requires exactly 3 arguments: <base> <ours> <theirs>.",
+                file=sys.stderr,
+            )
+            return 1
+        base_path, ours_path, theirs_path = sources
+        for p in (base_path, ours_path, theirs_path):
+            if not p.is_file():
+                print(f"Error: cassette file not found: {p}", file=sys.stderr)
+                return 1
+        effective_conflict = "keep-ours" if on_conflict is None else on_conflict
+        compress = _is_gzip_file(ours_path)
+        if base_path.stat().st_size == 0:
+            base_c = Cassette(path=base_path, interactions=[], recorded_at="", metadata={})
+        else:
+            base_c = Cassette.load(base_path)
+        ours_c = Cassette.load(ours_path)
+        theirs_c = Cassette.load(theirs_path)
+        merged_3w, conflicts = Cassette.merge_three_way(
+            base_c,
+            ours_c,
+            theirs_c,
+            output_path=ours_path,
+            on_conflict=effective_conflict,
+        )
+        merged_3w.save(compress=compress)
+        if conflicts:
+            print(
+                f"Merged 3-way into {ours_path} "
+                f"({len(conflicts)} conflict(s) resolved via {effective_conflict})."
+            )
+        else:
+            print(
+                f"Merged 3-way cleanly into {ours_path} "
+                f"({len(merged_3w.interactions)} interaction(s))."
+            )
+        return 0
+
+    if on_conflict is not None:
+        print("Error: --on-conflict is only valid with --git-driver.", file=sys.stderr)
+        return 1
+    if deduplicate and on_duplicate == "keep-all":
+        print(
+            "Error: --deduplicate cannot be combined with --on-duplicate keep-all.",
+            file=sys.stderr,
+        )
+        return 1
+    if output is None:
+        print("Error: -o/--output is required unless --git-driver is set.", file=sys.stderr)
+        return 1
+
+    effective_on_duplicate = "keep-all" if on_duplicate is None else on_duplicate
     output_resolved = output.resolve()
     seen_files: set[Path] = set()
     files: list[Path] = []
@@ -2444,7 +2533,13 @@ def _cmd_merge(
         print("Error: no cassette files found to merge.", file=sys.stderr)
         return 1
     cassettes = [Cassette.load(p) for p in files]
-    merged = Cassette.merge(*cassettes, output_path=output, deduplicate=deduplicate)
+    merged = Cassette.merge(
+        *cassettes,
+        output_path=output,
+        deduplicate=deduplicate,
+        on_duplicate=effective_on_duplicate,
+        sort_by=sort_by,
+    )
     merged.save()
     print(
         f"Merged {len(files)} cassette(s) ({len(merged.interactions)} interaction(s)) -> {output}."
@@ -3079,25 +3174,48 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_merge = sub.add_parser(
         "merge",
-        help="Merge multiple cassettes (or directories) into a single cassette file.",
+        help="Merge multiple cassettes (or run 3-way Git merge driver with --git-driver).",
     )
     p_merge.add_argument(
         "sources",
         type=Path,
         nargs="+",
-        help="Source cassette files or directories to merge in order.",
+        help="Source cassette files/directories (or <base> <ours> <theirs> with --git-driver).",
     )
     p_merge.add_argument(
         "-o",
         "--output",
         type=Path,
-        required=True,
-        help="Destination cassette path (.tape.json or .tape.json.gz).",
+        default=None,
+        help="Destination cassette path (.tape.json(.gz)); required unless --git-driver.",
     )
     p_merge.add_argument(
         "--deduplicate",
         action="store_true",
         help="Drop duplicate interactions sharing the same request fingerprint.",
+    )
+    p_merge.add_argument(
+        "--on-duplicate",
+        choices=list(MERGE_DUPLICATE_STRATEGIES),
+        default=None,
+        help="Duplicate fingerprint strategy (default: keep-all).",
+    )
+    p_merge.add_argument(
+        "--sort-by",
+        choices=list(MERGE_SORT_KEYS),
+        default=None,
+        help="Optional sort order for merged interactions: recorded_at, latency, or cost.",
+    )
+    p_merge.add_argument(
+        "--git-driver",
+        action="store_true",
+        help="Run 3-way Git merge driver (<base> <ours> <theirs>), writing in-place to <ours>.",
+    )
+    p_merge.add_argument(
+        "--on-conflict",
+        choices=list(MERGE_CONFLICT_STRATEGIES),
+        default=None,
+        help="Conflict resolution strategy for --git-driver (default: keep-ours).",
     )
 
     p_split = sub.add_parser(
@@ -3456,7 +3574,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "schema":
             return _cmd_schema(output=args.output)
         if args.command == "merge":
-            return _cmd_merge(args.sources, output=args.output, deduplicate=args.deduplicate)
+            return _cmd_merge(
+                args.sources,
+                output=args.output,
+                deduplicate=args.deduplicate,
+                on_duplicate=args.on_duplicate,
+                sort_by=args.sort_by,
+                git_driver=args.git_driver,
+                on_conflict=args.on_conflict,
+            )
         if args.command == "split":
             return _cmd_split(args.source, output_dir=args.output_dir, compress=args.compress)
         if args.command == "serve":

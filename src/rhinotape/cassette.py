@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import gzip
 import hashlib
 import io
 import json
 import math
 import os
+import re
 import tempfile
 import zlib
 from collections.abc import Callable
@@ -16,12 +18,96 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from rhinotape.models import CorruptCassetteError, Interaction, TapeNotFoundError
+from rhinotape.models import CorruptCassetteError, Interaction, TapeError, TapeNotFoundError
 
 SCHEMA_VERSION = 2
 CASSETTE_EXTENSIONS: tuple[str, ...] = (".tape.json", ".tape.json.gz")
 MAX_CASSETTE_BYTES = 100 * 1024 * 1024  # 100 MiB decompression safety cap
 _GZIP_MAGIC = b"\x1f\x8b"
+
+MERGE_DUPLICATE_STRATEGIES: tuple[str, ...] = (
+    "keep-all",
+    "keep-first",
+    "keep-last",
+    "keep-newest",
+    "error",
+)
+MERGE_SORT_KEYS: tuple[str, ...] = ("recorded_at", "latency", "cost")
+MERGE_CONFLICT_STRATEGIES: tuple[str, ...] = (
+    "keep-ours",
+    "keep-theirs",
+    "keep-newest",
+    "error",
+)
+
+
+_ISO_FRAC_RE = re.compile(r"(\d{2}:\d{2}:\d{2})\.(\d+)")
+_ISO_COMPACT_TZ_RE = re.compile(r"([Tt ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?[+-]\d{2})(\d{2})$")
+
+
+def _parse_recorded_at(raw: Any) -> datetime | None:
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    if text.endswith(("Z", "z")):
+        text = f"{text[:-1]}+00:00"
+    else:
+        text = _ISO_COMPACT_TZ_RE.sub(r"\1:\2", text)
+    text = _ISO_FRAC_RE.sub(lambda m: f"{m.group(1)}.{(m.group(2) + '000000')[:6]}", text)
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _prefer_later_timestamp(existing_ts: datetime | None, candidate_ts: datetime | None) -> bool:
+    if candidate_ts is None:
+        return existing_ts is None
+    if existing_ts is None:
+        return True
+    return candidate_ts >= existing_ts
+
+
+def _finite_sort_key(value: Any) -> tuple[int, float]:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+        return (0, float(value))
+    return (1, 0.0)
+
+
+def _meta_values_equal(a: Any, b: Any) -> bool:
+    if isinstance(a, bool) != isinstance(b, bool):
+        return False
+    if isinstance(a, float) and isinstance(b, float) and math.isnan(a) and math.isnan(b):
+        return True
+    if isinstance(a, dict) and isinstance(b, dict):
+        if a.keys() != b.keys():
+            return False
+        return all(_meta_values_equal(a[k], b[k]) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        if len(a) != len(b):
+            return False
+        return all(_meta_values_equal(x, y) for x, y in zip(a, b, strict=True))
+    return bool(a == b)
+
+
+def _index_interactions(interactions: list[Interaction]) -> dict[tuple[str, int], Interaction]:
+    counts: dict[str, int] = {}
+    indexed: dict[tuple[str, int], Interaction] = {}
+    for inter in interactions:
+        fp = inter.request.fingerprint
+        occ = counts.get(fp, 0)
+        counts[fp] = occ + 1
+        indexed[(fp, occ)] = inter
+    return indexed
+
+
+def _interactions_equal(a: Interaction, b: Interaction) -> bool:
+    return a.to_dict() == b.to_dict()
 
 
 def cassette_json_schema() -> dict[str, Any]:
@@ -172,24 +258,242 @@ class Cassette:
         *cassettes: Cassette,
         output_path: str | Path,
         deduplicate: bool = False,
+        on_duplicate: str = "keep-all",
+        sort_by: str | None = None,
     ) -> Cassette:
         """Combine multiple cassettes in order into a single Cassette."""
-        merged_interactions: list[Interaction] = []
+        if on_duplicate not in MERGE_DUPLICATE_STRATEGIES:
+            raise ValueError(
+                f"Unknown on_duplicate strategy {on_duplicate!r}; "
+                f"expected one of {MERGE_DUPLICATE_STRATEGIES}."
+            )
+        if sort_by is not None and sort_by not in MERGE_SORT_KEYS:
+            raise ValueError(
+                f"Unknown sort_by value {sort_by!r}; expected None or one of {MERGE_SORT_KEYS}."
+            )
+
+        strategy = "keep-first" if (deduplicate and on_duplicate == "keep-all") else on_duplicate
         merged_meta: dict[str, Any] = {}
-        seen_fps: set[str] = set()
-        for c in cassettes:
-            merged_meta.update(c.metadata)
-            for inter in c.interactions:
-                if deduplicate:
-                    if inter.request.fingerprint in seen_fps:
-                        continue
-                    seen_fps.add(inter.request.fingerprint)
-                merged_interactions.append(inter)
+        items: list[tuple[datetime | None, Interaction]] = []
+
+        if strategy == "keep-all":
+            for c in cassettes:
+                for mk, mv in c.metadata.items():
+                    merged_meta[mk] = copy.deepcopy(mv)
+                c_ts = _parse_recorded_at(c.recorded_at)
+                for inter in c.interactions:
+                    items.append((c_ts, inter))
+        else:
+            by_fp: dict[str, tuple[datetime | None, Interaction]] = {}
+            for c in cassettes:
+                for mk, mv in c.metadata.items():
+                    merged_meta[mk] = copy.deepcopy(mv)
+                c_ts = _parse_recorded_at(c.recorded_at)
+                for inter in c.interactions:
+                    fp = inter.request.fingerprint
+                    if fp not in by_fp:
+                        by_fp[fp] = (c_ts, inter)
+                    elif strategy == "error":
+                        raise TapeError(f"Duplicate interaction fingerprint during merge: {fp}")
+                    elif strategy == "keep-last":
+                        by_fp[fp] = (c_ts, inter)
+                    elif strategy == "keep-newest":
+                        prev_ts, _ = by_fp[fp]
+                        if _prefer_later_timestamp(prev_ts, c_ts):
+                            by_fp[fp] = (c_ts, inter)
+            items = list(by_fp.values())
+
+        if sort_by == "recorded_at":
+            items.sort(
+                key=lambda pair: (0, pair[0].timestamp()) if pair[0] is not None else (1, 0.0)
+            )
+        elif sort_by == "latency":
+            items.sort(key=lambda pair: _finite_sort_key(pair[1].latency_ms))
+        elif sort_by == "cost":
+            items.sort(key=lambda pair: _finite_sort_key(pair[1].llm.estimated_cost_usd))
+
         return cls(
             path=Path(output_path),
-            interactions=merged_interactions,
+            interactions=[inter for _, inter in items],
             metadata=merged_meta,
         )
+
+    @classmethod
+    def merge_three_way(
+        cls,
+        base: Cassette,
+        ours: Cassette,
+        theirs: Cassette,
+        *,
+        output_path: str | Path,
+        on_conflict: str = "keep-ours",
+    ) -> tuple[Cassette, list[str]]:
+        """Perform a 3-way merge of base, ours, and theirs cassettes."""
+        if on_conflict not in MERGE_CONFLICT_STRATEGIES:
+            raise ValueError(
+                f"Unknown on_conflict strategy {on_conflict!r}; "
+                f"expected one of {MERGE_CONFLICT_STRATEGIES}."
+            )
+
+        ours_ts = _parse_recorded_at(ours.recorded_at)
+        theirs_ts = _parse_recorded_at(theirs.recorded_at)
+        prefer_theirs_on_newest = _prefer_later_timestamp(ours_ts, theirs_ts)
+
+        def _pick_side(ours_val: Any, theirs_val: Any) -> Any:
+            if on_conflict == "keep-theirs":
+                return theirs_val
+            if on_conflict == "keep-newest":
+                return theirs_val if prefer_theirs_on_newest else ours_val
+            return ours_val
+
+        base_idx = _index_interactions(base.interactions)
+        ours_idx = _index_interactions(ours.interactions)
+        theirs_idx = _index_interactions(theirs.interactions)
+
+        ordered_keys: list[tuple[str, int]] = []
+        seen_keys: set[tuple[str, int]] = set()
+        for source_map in (base_idx, ours_idx, theirs_idx):
+            for k in source_map:
+                if k not in seen_keys:
+                    seen_keys.add(k)
+                    ordered_keys.append(k)
+
+        merged_interactions: list[Interaction] = []
+        conflicts: list[str] = []
+
+        for k in ordered_keys:
+            fp, occ = k
+            label = fp if occ == 0 else f"{fp}#{occ + 1}"
+            b_item = base_idx.get(k)
+            o_item = ours_idx.get(k)
+            t_item = theirs_idx.get(k)
+
+            if b_item is None:
+                if o_item is not None and t_item is None:
+                    merged_interactions.append(o_item)
+                elif o_item is None and t_item is not None:
+                    merged_interactions.append(t_item)
+                elif o_item is not None and t_item is not None:
+                    if _interactions_equal(o_item, t_item):
+                        merged_interactions.append(o_item)
+                    else:
+                        conflicts.append(
+                            f"interaction {label}: added with different content in ours and theirs"
+                        )
+                        chosen = _pick_side(o_item, t_item)
+                        if chosen is not None:
+                            merged_interactions.append(chosen)
+                continue
+
+            if o_item is not None and t_item is not None:
+                o_changed = not _interactions_equal(b_item, o_item)
+                t_changed = not _interactions_equal(b_item, t_item)
+                if not o_changed and not t_changed:
+                    merged_interactions.append(o_item)
+                elif o_changed and not t_changed:
+                    merged_interactions.append(o_item)
+                elif not o_changed and t_changed:
+                    merged_interactions.append(t_item)
+                elif _interactions_equal(o_item, t_item):
+                    merged_interactions.append(o_item)
+                else:
+                    conflicts.append(
+                        f"interaction {label}: modified differently in ours and theirs"
+                    )
+                    merged_interactions.append(_pick_side(o_item, t_item))
+            elif o_item is None and t_item is not None:
+                if not _interactions_equal(b_item, t_item):
+                    conflicts.append(f"interaction {label}: deleted in ours but modified in theirs")
+                    chosen = _pick_side(None, t_item)
+                    if chosen is not None:
+                        merged_interactions.append(chosen)
+            elif o_item is not None and t_item is None:
+                if not _interactions_equal(b_item, o_item):
+                    conflicts.append(f"interaction {label}: modified in ours but deleted in theirs")
+                    chosen = _pick_side(o_item, None)
+                    if chosen is not None:
+                        merged_interactions.append(chosen)
+
+        sentinel = object()
+        meta_keys: list[str] = []
+        seen_meta: set[str] = set()
+        for meta_dict in (base.metadata, ours.metadata, theirs.metadata):
+            for mk in meta_dict:
+                if mk not in seen_meta:
+                    seen_meta.add(mk)
+                    meta_keys.append(mk)
+
+        merged_meta: dict[str, Any] = {}
+        for mk in meta_keys:
+            vb = base.metadata.get(mk, sentinel)
+            vo = ours.metadata.get(mk, sentinel)
+            vt = theirs.metadata.get(mk, sentinel)
+            if vb is sentinel:
+                if vo is not sentinel and vt is sentinel:
+                    merged_meta[mk] = copy.deepcopy(vo)
+                elif vo is sentinel and vt is not sentinel:
+                    merged_meta[mk] = copy.deepcopy(vt)
+                elif _meta_values_equal(vo, vt):
+                    merged_meta[mk] = copy.deepcopy(vo)
+                else:
+                    conflicts.append(f"metadata[{mk!r}]: added differently in ours and theirs")
+                    merged_meta[mk] = copy.deepcopy(_pick_side(vo, vt))
+            elif vo is not sentinel and vt is not sentinel:
+                o_mod = not _meta_values_equal(vo, vb)
+                t_mod = not _meta_values_equal(vt, vb)
+                if not o_mod and not t_mod:
+                    merged_meta[mk] = copy.deepcopy(vo)
+                elif o_mod and not t_mod:
+                    merged_meta[mk] = copy.deepcopy(vo)
+                elif not o_mod and t_mod:
+                    merged_meta[mk] = copy.deepcopy(vt)
+                elif _meta_values_equal(vo, vt):
+                    merged_meta[mk] = copy.deepcopy(vo)
+                else:
+                    conflicts.append(f"metadata[{mk!r}]: modified differently in ours and theirs")
+                    merged_meta[mk] = copy.deepcopy(_pick_side(vo, vt))
+            elif vo is sentinel and vt is not sentinel:
+                if not _meta_values_equal(vt, vb):
+                    conflicts.append(f"metadata[{mk!r}]: deleted in ours but modified in theirs")
+                    picked = _pick_side(sentinel, vt)
+                    if picked is not sentinel:
+                        merged_meta[mk] = copy.deepcopy(picked)
+            elif vo is not sentinel and vt is sentinel:
+                if not _meta_values_equal(vo, vb):
+                    conflicts.append(f"metadata[{mk!r}]: modified in ours but deleted in theirs")
+                    picked = _pick_side(vo, sentinel)
+                    if picked is not sentinel:
+                        merged_meta[mk] = copy.deepcopy(picked)
+
+        if conflicts and on_conflict == "error":
+            raise TapeError(
+                f"3-way cassette merge encountered {len(conflicts)} conflict(s): "
+                + "; ".join(conflicts)
+            )
+
+        base_ts = _parse_recorded_at(base.recorded_at)
+        if ours_ts is not None and theirs_ts is not None:
+            merged_recorded_at = theirs.recorded_at if theirs_ts >= ours_ts else ours.recorded_at
+        elif theirs_ts is not None:
+            merged_recorded_at = theirs.recorded_at
+        elif ours_ts is not None:
+            merged_recorded_at = ours.recorded_at
+        elif base_ts is not None:
+            merged_recorded_at = base.recorded_at
+        else:
+            raw_candidates = (ours.recorded_at, theirs.recorded_at, base.recorded_at)
+            merged_recorded_at = next(
+                (s for s in raw_candidates if isinstance(s, str) and s),
+                datetime.now(timezone.utc).isoformat(),
+            )
+
+        merged = cls(
+            path=Path(output_path),
+            interactions=merged_interactions,
+            recorded_at=merged_recorded_at,
+            metadata=merged_meta,
+        )
+        return merged, conflicts
 
     def filter(self, predicate: Callable[[Interaction], bool]) -> Cassette:
         """Return a new Cassette keeping only interactions where predicate(inter) is True."""
@@ -455,9 +759,10 @@ class Cassette:
             raise CorruptCassetteError(f"Failed to read cassette {cassette_path}: {exc}") from exc
         return cls.from_json(text, path=cassette_path)
 
-    def save(self) -> None:
+    def save(self, *, compress: bool | None = None) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        data_bytes = self.to_bytes(compress=self.path.suffix.lower() == ".gz")
+        use_gzip = self.path.suffix.lower() == ".gz" if compress is None else compress
+        data_bytes = self.to_bytes(compress=use_gzip)
 
         tmp_path: str | None = None
         try:
