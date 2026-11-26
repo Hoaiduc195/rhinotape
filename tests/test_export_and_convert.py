@@ -288,3 +288,38 @@ def test_convert_collision_protection_and_har_spec_fixes(
     assert entry["response"]["content"]["mimeType"] == "image/png"
     assert entry["response"]["content"]["encoding"] == "base64"
     assert entry["response"]["content"]["size"] == len(raw_bin)
+
+
+def test_cli_export_jsonl(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    tapes_dir = tmp_path / "jsonl_tapes"
+    _make_sample_cassette(tapes_dir / "first.tape.json", reasoning_tokens=25)
+    _make_sample_cassette(tapes_dir / "second.tape.json.gz", reasoning_tokens=10)
+
+    # 1. Export jsonl to stdout
+    assert main(["export", str(tapes_dir), "--format", "jsonl"]) == 0
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert len(lines) == 2
+
+    row1 = json.loads(lines[0])
+    assert row1["provider"] == "openai"
+    assert row1["model"] == "o3"
+    assert row1["request"]["method"] == "POST"
+    assert "https://api.openai.com" in row1["request"]["url"]
+    assert row1["response_text"] == "hello"
+    assert row1["usage"]["input_tokens"] == 200
+    assert row1["usage"]["reasoning_tokens"] == 25
+    assert row1["estimated_cost_usd"] == 0.0012
+    assert row1["latency_ms"] == 85.5
+
+    row2 = json.loads(lines[1])
+    assert row2["usage"]["reasoning_tokens"] == 10
+
+    # 2. Export jsonl to file with -o
+    jsonl_out = tmp_path / "out" / "batch.jsonl"
+    assert main(["export", str(tapes_dir), "--format", "jsonl", "-o", str(jsonl_out)]) == 0
+    assert "Exported jsonl report (2 cassette(s)) to" in capsys.readouterr().out
+    assert jsonl_out.exists()
+    disk_lines = [
+        line for line in jsonl_out.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
+    assert len(disk_lines) == 2
