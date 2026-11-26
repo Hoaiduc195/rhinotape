@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.0 - 2026-11-26
+
+### Added
+- **Auto-generate pytest tests (`rhinotape gen-test` / `generate_pytest_code()`):** Turn any recorded `.tape.json(.gz)` cassette into a ready-to-run, `ruff`- and `mypy --strict`-compliant pytest regression test with data-driven call, model, provider, token, cost, streaming, tool-sequence, and text assertions.
+- **Model Migration A/B Comparison (`rhinotape compare` / `compare_cassettes()`):** Compare baseline vs. candidate cassettes or directories with cost savings %, latency delta %, tool-call drift detection, normalized output similarity, GFM Markdown PR tables (`--markdown`), strict RFC 8259 JSON (`--json`), and CI gates (`--min-similarity`, `--max-cost-increase-pct`, `--fail-on-tool-drift`).
+- **Git 3-way Merge Driver & Enhanced Merge (`rhinotape merge --git-driver` / `Cassette.merge_three_way()`):** Semantic interaction-level 3-way merging for `.tape.json(.gz)` cassettes (including 0-byte Git `%O` add/add ancestors and in-place gzip preservation), plus `--on-duplicate` (`keep-all`, `keep-first`, `keep-last`, `keep-newest`, `error`) and `--sort-by` (`recorded_at`, `latency`, `cost`).
+- **Offline Synthetic Cassette Builder (`CassetteBuilder` in `rhinotape.mock`):** Fluent TDD builder producing authentic, parser-verified, replayable OpenAI, Anthropic, and Gemini JSON & SSE streaming cassettes (including tool calls, thinking/reasoning tokens, cache tokens, and HTTP errors) with zero API keys.
+- **Agent Loop & Recovery Assertions + Trajectory Graphs:** Added `TapeSession.assert_no_tool_loop()` and `TapeSession.assert_tool_recovery()`, plus `render_ascii_graph()` / `render_mermaid_graph()` wired into `rhinotape inspect --graph [ascii|mermaid]`.
+- **Cassette Staleness & Deprecated Model Verification:** Added `DEPRECATED_MODELS` and `get_deprecation_notice()` in `rhinotape.pricing`, wired into `rhinotape verify --max-age <duration> --warn-deprecated-models --fail-on-deprecated-models`.
+- **Fuzzy Text Request Matcher & PR Markdown Diffs:** Added `match_fuzzy_text()` in `rhinotape.matchers` and `rhinotape diff --markdown` with collapsible text diffs.
+- **OpenTelemetry (OTLP JSON) & Batch JSONL Exports:** Added `rhinotape export --format otel` / `otlp` (#12) and `rhinotape export --format jsonl` (#18) — thanks to `@md1qamar`!
+
+### Changed
+- **Copy-on-write scrubbing & single-pass combined PII regex:** Up to 68× faster `strip_ignored_fields` on large multi-turn conversation payloads and faster multi-preset PII redaction in `rhinotape.scrubbing`.
+
 ## 0.4.0 - 2026-11-26
 
 ### Changed

@@ -197,11 +197,11 @@ Custom & private model pricing is supported via `custom_pricing={...}` or `RHINO
 
 ## Key Capabilities
 
-- **Record & Replay Modes:** `once`, `replay`, `record`, `new_episodes`, `none` — with deterministic gzip `.tape.json.gz`, atomic writes, `MAX_CASSETTE_BYTES` zip-bomb guards, and pluggable `CassetteStore` (`FileCassetteStore`, `MemoryCassetteStore`).
-- **Automatic Secret & PII Scrubbing:** Redacts API keys, cookies, URL userinfo, sensitive/presigned query params, wildcard headers (`x-secret-*`), URL path patterns, dot-path JSON fields, regex patterns, and built-in PII presets (`email`, `phone`, `ssn`, `credit_card`, `ipv4`, `jwt`).
+- **Record, Replay & Offline Synthetic TDD:** Modes `once`, `replay`, `record`, `new_episodes`, `none` — with deterministic gzip `.tape.json.gz`, atomic writes, `MAX_CASSETTE_BYTES` zip-bomb guards, pluggable `CassetteStore` (`FileCassetteStore`, `MemoryCassetteStore`), and fluent `CassetteBuilder` to author authentic OpenAI/Anthropic/Gemini JSON & SSE cassettes offline with zero API keys.
+- **Automatic Secret & PII Scrubbing:** Redacts API keys, cookies, URL userinfo, sensitive/presigned query params, wildcard headers (`x-secret-*`), URL path patterns, dot-path JSON fields (copy-on-write), regex patterns, and single-pass PII presets (`email`, `phone`, `ssn`, `credit_card`, `ipv4`, `jwt`).
 - **Composable Matchers & Semantic Diffs:** Presets (`MATCH_STRICT`, `MATCH_RELAXED`, `MATCH_PATH_AND_BODY`), `ignore_fields`, `ignore_query_params`, `ignore_json_array_order`, `match_headers`, combinators (`match_all`, `match_any`, `match_json_subset`, `match_json_regex`, `match_header_equals`, `match_fuzzy_text`), and semantic JSON key-path diffs on mismatch.
-- **25+ Built-in Assertions:** `assert_cost_under`, `assert_max_cost_per_call`, `assert_tokens_under`, `assert_max_tokens_per_call`, `assert_reasoning_tokens_under`, `assert_cached_tokens_at_least`, `assert_cache_hit_rate_at_least`, `assert_json_output`, `assert_text_contains`, `assert_text_matches`, `assert_thinking_present`, `assert_streamed`, `assert_not_streamed`, `assert_status_codes`, `assert_model`, `assert_provider`, `assert_tool_called`, `assert_no_tool_called`, `assert_tool_call_count`, `assert_tool_args`, `assert_tool_sequence`, `assert_call_count`, `assert_no_errors`, `assert_no_unused_interactions`, `assert_max_latency_ms`.
-- **Chaos & Circuit Breakers:** `fail_nth`, `fail_first`, `inject_latency`, `corrupt_json_body`, `truncate_stream`, `chain_replay_hooks`, `replace_response`, plus concurrency-safe `max_interactions` and `max_cost_usd` live recording guardrails.
+- **27+ Built-in Assertions:** `assert_cost_under`, `assert_max_cost_per_call`, `assert_tokens_under`, `assert_max_tokens_per_call`, `assert_reasoning_tokens_under`, `assert_cached_tokens_at_least`, `assert_cache_hit_rate_at_least`, `assert_json_output`, `assert_text_contains`, `assert_text_matches`, `assert_thinking_present`, `assert_streamed`, `assert_not_streamed`, `assert_status_codes`, `assert_model`, `assert_provider`, `assert_tool_called`, `assert_no_tool_called`, `assert_tool_call_count`, `assert_tool_args`, `assert_tool_sequence`, `assert_no_tool_loop`, `assert_tool_recovery`, `assert_call_count`, `assert_no_errors`, `assert_no_unused_interactions`, `assert_max_latency_ms`.
+- **Chaos, Circuit Breakers & Model Lifecycle:** `fail_nth`, `fail_first`, `inject_latency`, `corrupt_json_body`, `truncate_stream`, `chain_replay_hooks`, `replace_response`, concurrency-safe `max_interactions` / `max_cost_usd` guardrails, `compare_cassettes()` A/B migration reports, and `DEPRECATED_MODELS` / `get_deprecation_notice()` lifecycle checks.
 
 ---
 
@@ -210,29 +210,37 @@ Custom & private model pricing is supported via `custom_pricing={...}` or `RHINO
 Available via `rhinotape` or `python -m rhinotape`:
 
 ```bash
-# Inspect, analyze & search cassettes
+# Inspect, visualize agent trajectories & search cassettes
 rhinotape inspect tests/tapes/agent.tape.json --show-bodies --show-thinking
+rhinotape inspect tests/tapes/agent.tape.json --graph mermaid
 rhinotape summary tests/tapes --group-by dir --max-cost 0.50
 rhinotape stats tests/tapes
 rhinotape list tests/tapes --sort cost --limit 10
 rhinotape search tests/tapes --tool web_search --status 200 --min-cost 0.001
 rhinotape pricing --filter claude
 
-# CI verification, secret & PII gates, fingerprint checks & regression diffs
-rhinotape verify tests/tapes --check-secrets --check-pii
+# Auto-generate pytest regression tests & run A/B model migration reports
+rhinotape gen-test tests/tapes/agent.tape.json -o tests/test_agent_generated.py
+rhinotape compare tapes_gpt4o/ tapes_gpt41_mini/ --markdown --min-similarity 0.85 --fail-on-tool-drift
+
+# CI verification, secret/PII/staleness/deprecation gates & regression diffs
+rhinotape verify tests/tapes --check-secrets --check-pii --max-age 30d --warn-deprecated-models
 rhinotape replay-check tests/tapes --ignore-fields metadata.trace_id
 rhinotape diff baseline/ candidate/ --max-cost-increase-pct 15 --fail-on-tool-change --show-text-diff --markdown
 
-# Maintenance: redact, reparse pricing, merge/split, gzip convert, prune stale
+# Maintenance: redact, reparse, Git 3-way merge driver, split, gzip convert, prune
 rhinotape redact tests/tapes --pii email,ssn --url-pattern '/tenants/[^/]+' --dry-run
 rhinotape reparse tests/tapes
-rhinotape merge a.tape.json b.tape.json -o combined.tape.json --deduplicate
+rhinotape merge a.tape.json b.tape.json -o combined.tape.json --on-duplicate keep-newest --sort-by recorded_at
+rhinotape merge --git-driver %O %A %B --on-conflict keep-newest
 rhinotape split combined.tape.json -o split_dir/
 rhinotape convert tests/tapes --to gzip --delete-source
 rhinotape prune tests/tapes --tests-dir tests/ --older-than-days 30
 
-# Export reports (Markdown, CSV, HAR 1.2, interactive HTML, JUnit XML), serve & run
+# Export reports (Markdown, CSV, HAR 1.2, HTML, JUnit XML, OTLP JSON, Batch JSONL), serve & run
 rhinotape export tests/tapes --format html -o trace.html
+rhinotape export tests/tapes --format otel -o traces.otel.json
+rhinotape export tests/tapes --format jsonl -o evals.jsonl
 rhinotape export tests/tapes --format junit -o junit.xml
 rhinotape serve tests/tapes/agent.tape.json --mode once --upstream https://api.openai.com --cors --redact-pii
 rhinotape run tests/tapes/agent.tape.json --mode replay --max-cost 0.05 -- npm test
@@ -245,7 +253,7 @@ Block accidental API key or PII leaks in committed cassettes automatically:
 ```yaml
 repos:
   - repo: https://github.com/Hoaiduc195/rhinotape
-    rev: v0.4.0
+    rev: v0.5.0
     hooks:
       - id: rhinotape-verify-pii
 ```
