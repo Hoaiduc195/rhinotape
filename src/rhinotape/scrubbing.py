@@ -6,6 +6,7 @@ import base64
 import copy
 import difflib
 import fnmatch
+import functools
 import hashlib
 import json
 import re
@@ -238,46 +239,6 @@ def encode_body(body: Any) -> bytes:
     return str(body).encode("utf-8")
 
 
-_SENTINEL = object()
-
-
-def _mark_delete_path(node: Any, parts: list[str]) -> None:
-    if not parts:
-        return
-    head, *rest = parts
-    if isinstance(node, dict):
-        if head == "*":
-            if not rest:
-                node.clear()
-            else:
-                for val in node.values():
-                    _mark_delete_path(val, rest)
-        elif head in node:
-            if not rest:
-                del node[head]
-            else:
-                _mark_delete_path(node[head], rest)
-    elif isinstance(node, list):
-        if head == "*":
-            for item in node:
-                _mark_delete_path(item, rest)
-        elif head.isdigit():
-            idx = int(head)
-            if 0 <= idx < len(node):
-                if not rest:
-                    node[idx] = _SENTINEL
-                else:
-                    _mark_delete_path(node[idx], rest)
-
-
-def _prune_sentinels(node: Any) -> Any:
-    if isinstance(node, list):
-        return [_prune_sentinels(item) for item in node if item is not _SENTINEL]
-    if isinstance(node, dict):
-        return {k: _prune_sentinels(v) for k, v in node.items()}
-    return node
-
-
 def _redact_path(node: Any, parts: list[str]) -> None:
     if not parts:
         return
@@ -314,6 +275,8 @@ def _redact_path(node: Any, parts: list[str]) -> None:
 
 def compile_patterns(patterns: Iterable[str | re.Pattern[str]]) -> tuple[re.Pattern[str], ...]:
     """Compile an iterable of regex strings or pre-compiled Patterns into a tuple."""
+    if isinstance(patterns, tuple) and all(isinstance(p, re.Pattern) for p in patterns):
+        return patterns
     compiled: list[re.Pattern[str]] = []
     for pat in patterns:
         if isinstance(pat, re.Pattern):
@@ -323,6 +286,36 @@ def compile_patterns(patterns: Iterable[str | re.Pattern[str]]) -> tuple[re.Patt
     return tuple(compiled)
 
 
+_UNSAFE_COMBINE_RE = re.compile(r"(?<!\\)\\[1-9]|(?<!\\)\(\?P[<=]|(?<!\\)\(\?[aiLmsux-]+[:)]")
+
+
+@functools.lru_cache(maxsize=64)
+def _combine_patterns(
+    compiled: tuple[re.Pattern[str], ...],
+) -> re.Pattern[str] | None:
+    """Combine compatible regexes into a single-pass alternation when safe."""
+    if len(compiled) < 2:
+        return compiled[0] if compiled else None
+    flags = compiled[0].flags
+    for pat in compiled:
+        if pat.flags != flags or _UNSAFE_COMBINE_RE.search(pat.pattern):
+            return None
+    try:
+        return re.compile("|".join(f"(?:{p.pattern})" for p in compiled), flags)
+    except re.error:
+        return None
+
+
+def _apply_compiled_patterns(text: str, compiled: tuple[re.Pattern[str], ...]) -> str:
+    combined = _combine_patterns(compiled)
+    if combined is not None:
+        return combined.sub(REDACTED, text)
+    result = text
+    for pat in compiled:
+        result = pat.sub(REDACTED, result)
+    return result
+
+
 def redact_text(text: str, redact_patterns: Iterable[str | re.Pattern[str]]) -> str:
     """Apply regex redaction patterns to a string."""
     if not text or not redact_patterns:
@@ -330,13 +323,13 @@ def redact_text(text: str, redact_patterns: Iterable[str | re.Pattern[str]]) -> 
     compiled = compile_patterns(redact_patterns)
     if not compiled:
         return text
-    result = text
-    for pat in compiled:
-        result = pat.sub(REDACTED, result)
-    return result
+    return _apply_compiled_patterns(text, compiled)
 
 
-def _redact_patterns_in_node(node: Any, compiled: Sequence[re.Pattern[str]]) -> Any:
+def _redact_patterns_in_node(node: Any, compiled: tuple[re.Pattern[str], ...]) -> Any:
+    combined = _combine_patterns(compiled)
+    if combined is not None:
+        return _redact_single_pattern_in_node(node, combined)
     if isinstance(node, str):
         result = node
         for pat in compiled:
@@ -346,6 +339,16 @@ def _redact_patterns_in_node(node: Any, compiled: Sequence[re.Pattern[str]]) -> 
         return [_redact_patterns_in_node(item, compiled) for item in node]
     if isinstance(node, dict):
         return {k: _redact_patterns_in_node(v, compiled) for k, v in node.items()}
+    return node
+
+
+def _redact_single_pattern_in_node(node: Any, pattern: re.Pattern[str]) -> Any:
+    if isinstance(node, str):
+        return pattern.sub(REDACTED, node)
+    if isinstance(node, list):
+        return [_redact_single_pattern_in_node(item, pattern) for item in node]
+    if isinstance(node, dict):
+        return {k: _redact_single_pattern_in_node(v, pattern) for k, v in node.items()}
     return node
 
 
@@ -378,56 +381,137 @@ def redact_body(
     return result
 
 
-def _sort_array_path(node: Any, parts: list[str]) -> None:
+def _sort_array_path_cow(node: Any, parts: list[str]) -> Any:
     if not parts:
         if isinstance(node, list):
-            node.sort(
+            return sorted(
+                node,
                 key=lambda item: json.dumps(
                     item, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-                )
+                ),
             )
-        return
+        return node
     head, *rest = parts
     if isinstance(node, dict):
         if head == "*":
-            for val in node.values():
-                _sort_array_path(val, rest)
-        elif head in node:
-            _sort_array_path(node[head], rest)
-    elif isinstance(node, list):
+            return {k: _sort_array_path_cow(v, rest) for k, v in node.items()}
+        if head in node:
+            new_val = _sort_array_path_cow(node[head], rest)
+            if new_val is node[head]:
+                return node
+            out = dict(node)
+            out[head] = new_val
+            return out
+        return node
+    if isinstance(node, list):
         if head == "*":
-            for item in node:
-                _sort_array_path(item, rest)
-        elif head.isdigit():
+            return [_sort_array_path_cow(item, rest) for item in node]
+        if head.isdigit():
             idx = int(head)
             if 0 <= idx < len(node):
-                _sort_array_path(node[idx], rest)
+                new_val = _sort_array_path_cow(node[idx], rest)
+                if new_val is node[idx]:
+                    return node
+                out_list = list(node)
+                out_list[idx] = new_val
+                return out_list
+        return node
+    return node
+
+
+_SENTINEL = object()
+
+
+def _strip_path_cow(node: Any, parts: list[str], mark_list: list[bool]) -> Any:
+    if not parts:
+        return node
+    head, *rest = parts
+    if isinstance(node, dict):
+        if head == "*":
+            if not rest:
+                return {}
+            return {k: _strip_path_cow(v, rest, mark_list) for k, v in node.items()}
+        if head in node:
+            if not rest:
+                return {k: v for k, v in node.items() if k != head}
+            new_val = _strip_path_cow(node[head], rest, mark_list)
+            if new_val is node[head]:
+                return node
+            out = dict(node)
+            out[head] = new_val
+            return out
+        return node
+    if isinstance(node, list):
+        if head == "*":
+            return [_strip_path_cow(item, rest, mark_list) for item in node]
+        if head.isdigit():
+            idx = int(head)
+            if 0 <= idx < len(node):
+                if not rest:
+                    mark_list[0] = True
+                    out_list = list(node)
+                    out_list[idx] = _SENTINEL
+                    return out_list
+                new_val = _strip_path_cow(node[idx], rest, mark_list)
+                if new_val is node[idx]:
+                    return node
+                out_list = list(node)
+                out_list[idx] = new_val
+                return out_list
+        return node
+    return node
+
+
+def _prune_sentinels_cow(node: Any) -> Any:
+    if isinstance(node, list):
+        changed = False
+        out_list: list[Any] = []
+        for item in node:
+            if item is _SENTINEL:
+                changed = True
+                continue
+            pruned = _prune_sentinels_cow(item)
+            if pruned is not item:
+                changed = True
+            out_list.append(pruned)
+        return out_list if changed else node
+    if isinstance(node, dict):
+        changed = False
+        out_dict: dict[str, Any] = {}
+        for k, v in node.items():
+            pruned = _prune_sentinels_cow(v)
+            if pruned is not v:
+                changed = True
+            out_dict[k] = pruned
+        return out_dict if changed else node
+    return node
 
 
 def normalize_json_array_order(body: Any, array_paths: Iterable[str]) -> Any:
-    """Return a deep copy of body with JSON arrays at dot-paths sorted canonically."""
+    """Return a copy-on-write view of body with JSON arrays at dot-paths sorted canonically."""
     if not array_paths or not isinstance(body, (dict, list)):
         return body
     paths = [p.strip() for p in array_paths if p.strip()]
     if not paths:
         return body
-    cloned = copy.deepcopy(body)
+    result = body
     for field_path in paths:
-        _sort_array_path(cloned, field_path.split("."))
-    return cloned
+        result = _sort_array_path_cow(result, field_path.split("."))
+    return result
 
 
 def strip_ignored_fields(body: Any, ignore_fields: Iterable[str]) -> Any:
-    """Return a deep copy of body with dot-path fields (supporting '*' wildcards) removed."""
+    """Return a copy-on-write view of body with ignored dot-path fields ('*' wildcards) removed."""
     if not ignore_fields or not isinstance(body, (dict, list)):
         return body
     fields = [f.strip() for f in ignore_fields if f.strip()]
     if not fields:
         return body
-    cloned = copy.deepcopy(body)
+    has_sentinel = [False]
+    result = body
     for field_path in fields:
-        _mark_delete_path(cloned, field_path.split("."))
-    return _prune_sentinels(cloned)
+        result = _strip_path_cow(result, field_path.split("."), has_sentinel)
+    return _prune_sentinels_cow(result) if has_sentinel[0] else result
 
 
 def validate_match_on(match_on: Iterable[str]) -> tuple[str, ...]:
@@ -469,6 +553,11 @@ def fingerprint_request(
         if isinstance(filtered_body, (dict, list))
         else ("" if filtered_body is None else str(filtered_body))
     )
+
+    if match_on is DEFAULT_MATCH_ON and not match_headers:
+        # Fast path: preserve exact v0.1/v0.2 fingerprint hash format without re-validating
+        payload = f"{method.upper()}\n{normalized_url}\n{canonical_body}"
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
     keys = validate_match_on(match_on)
     header_filter = frozenset(h.lower().strip() for h in match_headers if h.strip())

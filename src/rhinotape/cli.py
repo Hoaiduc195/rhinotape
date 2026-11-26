@@ -592,6 +592,7 @@ def _cmd_diff(
     path_b: Path,
     *,
     as_json: bool = False,
+    as_markdown: bool = False,
     max_cost_increase: float | None = None,
     max_cost_increase_pct: float | None = None,
     fail_on_tool_change: bool = False,
@@ -622,6 +623,7 @@ def _cmd_diff(
             path_a,
             path_b,
             as_json=as_json,
+            as_markdown=as_markdown,
             max_cost_increase=max_cost_increase,
             max_cost_increase_pct=max_cost_increase_pct,
             fail_on_tool_change=fail_on_tool_change,
@@ -692,6 +694,55 @@ def _cmd_diff(
         print(json.dumps(payload, indent=2))
         return 1 if violations else 0
 
+    if as_markdown:
+        status_label = "FAILED" if violations else "PASS"
+        lines = [
+            f"### rhinotape Diff (`{path_a.name}` -> `{path_b.name}`) — {status_label}",
+            "",
+            "| Metric | Before | After | Delta |",
+            "| :--- | ---: | ---: | ---: |",
+            f"| Calls | {stats_a['calls']} | {stats_b['calls']} | {delta_calls:+d} |",
+            (
+                f"| Total Tokens | {stats_a['total_tokens']} | "
+                f"{stats_b['total_tokens']} | {delta_tokens:+d} |"
+            ),
+            (
+                f"| Cached Tokens | {stats_a['cached_input_tokens']} | "
+                f"{stats_b['cached_input_tokens']} | {delta_cached:+d} |"
+            ),
+            (
+                f"| Est. Cost (USD) | ${stats_a['estimated_cost_usd']:.6f} | "
+                f"${stats_b['estimated_cost_usd']:.6f} | ${delta_cost:+.6f} |"
+            ),
+            (
+                f"| Latency | {stats_a['latency_ms']:.1f}ms | "
+                f"{stats_b['latency_ms']:.1f}ms | {delta_latency:+.1f}ms |"
+            ),
+            (
+                f"| Tools | `{stats_a['tools']}` | `{stats_b['tools']}` | "
+                f"{'changed' if tools_changed else 'same'} |"
+            ),
+        ]
+        if violations:
+            lines.append("")
+            lines.append("> **Regression gate failed:**")
+            for msg in violations:
+                lines.append(f"> - {msg}")
+        if show_text_diff:
+            lines.append("")
+            if text_diff_lines:
+                lines.append("<details>")
+                lines.append("<summary>Response Text Diff</summary>")
+                lines.append("")
+                lines.append("```diff")
+                lines.extend(text_diff_lines)
+                lines.append("```")
+                lines.append("</details>")
+            else:
+                lines.append("_Response Text Diff: identical_")
+        print("\n".join(lines))
+        return 1 if violations else 0
+
     print(f"Comparing {path_a} -> {path_b}")
     print(f"  Calls    : {stats_a['calls']} -> {stats_b['calls']} ({delta_calls:+d})")
     print(
@@ -725,6 +776,7 @@ def _cmd_diff_dirs(
     dir_b: Path,
     *,
     as_json: bool = False,
+    as_markdown: bool = False,
     max_cost_increase: float | None = None,
     max_cost_increase_pct: float | None = None,
     fail_on_tool_change: bool = False,
@@ -839,6 +891,62 @@ def _cmd_diff_dirs(
     }
     if as_json:
         print(json.dumps(payload, indent=2))
+        return 1 if violations else 0
+
+    if as_markdown:
+        status_label = "FAILED" if violations else "PASS"
+        lines = [
+            f"### rhinotape Directory Diff (`{dir_a}` -> `{dir_b}`) — {status_label}",
+            "",
+            (
+                f"Files: **+{len(added)}** added · **-{len(removed)}** removed · "
+                f"**~{len(changed)}** changed · **={unchanged}** unchanged"
+            ),
+            "",
+            "| Metric | Before | After | Delta |",
+            "| :--- | ---: | ---: | ---: |",
+            f"| Calls | {before_calls} | {after_calls} | {after_calls - before_calls:+d} |",
+            (
+                f"| Total Tokens | {before_tokens} | {after_tokens} | "
+                f"{after_tokens - before_tokens:+d} |"
+            ),
+            (
+                f"| Cached Tokens | {before_cached} | {after_cached} | "
+                f"{after_cached - before_cached:+d} |"
+            ),
+            f"| Est. Cost (USD) | ${before_cost:.6f} | ${after_cost:.6f} | ${delta_cost:+.6f} |",
+            (
+                f"| Latency | {before_latency:.1f}ms | {after_latency:.1f}ms | "
+                f"{delta_latency:+.1f}ms |"
+            ),
+        ]
+        if changed:
+            lines.extend(
+                [
+                    "",
+                    "| Changed Cassette | Calls Δ | Tokens Δ | Cost Δ | Tools |",
+                    "| :--- | ---: | ---: | ---: | :---: |",
+                ]
+            )
+            for item in changed:
+                d = item["delta"]
+                lines.append(
+                    f"| `{item['relative_path']}` | {d['calls']:+d} | "
+                    f"{d['total_tokens']:+d} | ${d['estimated_cost_usd']:+.6f} | "
+                    f"{'changed' if d['tools_changed'] else 'same'} |"
+                )
+        if added:
+            lines.append("")
+            lines.append("**Added:** " + ", ".join(f"`{p}`" for p in added))
+        if removed:
+            lines.append("")
+            lines.append("**Removed:** " + ", ".join(f"`{p}`" for p in removed))
+        if violations:
+            lines.append("")
+            lines.append("> **Regression gate failed:**")
+            for msg in violations:
+                lines.append(f"> - {msg}")
+        print("\n".join(lines))
         return 1 if violations else 0
 
     print(f"Comparing directories {dir_a} -> {dir_b}")
@@ -2402,6 +2510,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_diff.add_argument("after", type=Path, help="New .tape.json file or directory.")
     p_diff.add_argument("--json", action="store_true", dest="as_json", help="Output JSON.")
     p_diff.add_argument(
+        "--markdown",
+        action="store_true",
+        dest="as_markdown",
+        help="Output GitHub-Flavored Markdown report (ideal for PR comments).",
+    )
+    p_diff.add_argument(
         "--max-cost-increase",
         type=float,
         default=None,
@@ -2890,6 +3004,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.before,
                 args.after,
                 as_json=args.as_json,
+                as_markdown=args.as_markdown,
                 max_cost_increase=args.max_cost_increase,
                 max_cost_increase_pct=args.max_cost_increase_pct,
                 fail_on_tool_change=args.fail_on_tool_change,

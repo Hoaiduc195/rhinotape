@@ -8,6 +8,7 @@
 
 Zero API spend in CI · Automatic secret & PII scrubbing · True sync & async SSE streaming · Token, USD cost & tool-call assertions · Single core dependency (`httpx`)
 
+[![PyPI](https://img.shields.io/pypi/v/rhinotape.svg?color=3776AB)](https://pypi.org/project/rhinotape/)
 [![CI](https://github.com/Hoaiduc195/rhinotape/actions/workflows/ci.yml/badge.svg)](https://github.com/Hoaiduc195/rhinotape/actions/workflows/ci.yml)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%20|%203.11%20|%203.12%20|%203.13-3776AB?logo=python&logoColor=white)](https://github.com/Hoaiduc195/rhinotape/blob/master/pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22c55e.svg)](https://github.com/Hoaiduc195/rhinotape/blob/master/LICENSE)
@@ -198,7 +199,7 @@ Custom & private model pricing is supported via `custom_pricing={...}` or `RHINO
 
 - **Record & Replay Modes:** `once`, `replay`, `record`, `new_episodes`, `none` — with deterministic gzip `.tape.json.gz`, atomic writes, `MAX_CASSETTE_BYTES` zip-bomb guards, and pluggable `CassetteStore` (`FileCassetteStore`, `MemoryCassetteStore`).
 - **Automatic Secret & PII Scrubbing:** Redacts API keys, cookies, URL userinfo, sensitive/presigned query params, wildcard headers (`x-secret-*`), URL path patterns, dot-path JSON fields, regex patterns, and built-in PII presets (`email`, `phone`, `ssn`, `credit_card`, `ipv4`, `jwt`).
-- **Composable Matchers & Semantic Diffs:** Presets (`MATCH_STRICT`, `MATCH_RELAXED`, `MATCH_PATH_AND_BODY`), `ignore_fields`, `ignore_query_params`, `ignore_json_array_order`, `match_headers`, combinators (`match_all`, `match_any`, `match_json_subset`, `match_json_regex`, `match_header_equals`), and semantic JSON key-path diffs on mismatch.
+- **Composable Matchers & Semantic Diffs:** Presets (`MATCH_STRICT`, `MATCH_RELAXED`, `MATCH_PATH_AND_BODY`), `ignore_fields`, `ignore_query_params`, `ignore_json_array_order`, `match_headers`, combinators (`match_all`, `match_any`, `match_json_subset`, `match_json_regex`, `match_header_equals`, `match_fuzzy_text`), and semantic JSON key-path diffs on mismatch.
 - **25+ Built-in Assertions:** `assert_cost_under`, `assert_max_cost_per_call`, `assert_tokens_under`, `assert_max_tokens_per_call`, `assert_reasoning_tokens_under`, `assert_cached_tokens_at_least`, `assert_cache_hit_rate_at_least`, `assert_json_output`, `assert_text_contains`, `assert_text_matches`, `assert_thinking_present`, `assert_streamed`, `assert_not_streamed`, `assert_status_codes`, `assert_model`, `assert_provider`, `assert_tool_called`, `assert_no_tool_called`, `assert_tool_call_count`, `assert_tool_args`, `assert_tool_sequence`, `assert_call_count`, `assert_no_errors`, `assert_no_unused_interactions`, `assert_max_latency_ms`.
 - **Chaos & Circuit Breakers:** `fail_nth`, `fail_first`, `inject_latency`, `corrupt_json_body`, `truncate_stream`, `chain_replay_hooks`, `replace_response`, plus concurrency-safe `max_interactions` and `max_cost_usd` live recording guardrails.
 
@@ -220,7 +221,7 @@ rhinotape pricing --filter claude
 # CI verification, secret & PII gates, fingerprint checks & regression diffs
 rhinotape verify tests/tapes --check-secrets --check-pii
 rhinotape replay-check tests/tapes --ignore-fields metadata.trace_id
-rhinotape diff baseline/ candidate/ --max-cost-increase-pct 15 --fail-on-tool-change --show-text-diff
+rhinotape diff baseline/ candidate/ --max-cost-increase-pct 15 --fail-on-tool-change --show-text-diff --markdown
 
 # Maintenance: redact, reparse pricing, merge/split, gzip convert, prune stale
 rhinotape redact tests/tapes --pii email,ssn --url-pattern '/tenants/[^/]+' --dry-run
