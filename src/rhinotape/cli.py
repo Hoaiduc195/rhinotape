@@ -1339,6 +1339,127 @@ def _render_har(cassettes: list[Cassette]) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
 
 
+def _otel_attr(key: str, val: Any) -> dict[str, Any]:
+    if isinstance(val, bool):
+        return {"key": key, "value": {"boolValue": val}}
+    elif isinstance(val, int):
+        return {"key": key, "value": {"intValue": val}}
+    elif isinstance(val, float):
+        return {"key": key, "value": {"doubleValue": val}}
+    elif isinstance(val, (dict, list)):
+        return {"key": key, "value": {"stringValue": json.dumps(val, ensure_ascii=False)}}
+    else:
+        return {"key": key, "value": {"stringValue": str(val)}}
+
+
+def _render_otel(cassettes: list[Cassette]) -> str:
+    import hashlib
+
+    spans: list[dict[str, Any]] = []
+
+    for c_idx, cassette in enumerate(cassettes):
+        cassette_name = cassette.path.name if cassette.path else f"cassette_{c_idx}"
+        if cassette.recorded_at:
+            try:
+                dt = datetime.fromisoformat(cassette.recorded_at.replace("Z", "+00:00"))
+                curr_ns = int(dt.timestamp() * 1_000_000_000)
+            except Exception:
+                curr_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+        else:
+            curr_ns = int(datetime.now(timezone.utc).timestamp() * 1_000_000_000)
+
+        trace_seed = f"{cassette_name}:{cassette.recorded_at or c_idx}".encode("utf-8")
+        trace_id = hashlib.sha256(trace_seed).hexdigest()[:32]
+
+        for i_idx, inter in enumerate(cassette.interactions):
+            span_seed = f"{trace_id}:{i_idx}:{inter.request.method}:{inter.request.url}".encode("utf-8")
+            span_id = hashlib.sha256(span_seed).hexdigest()[:16]
+
+            duration_ns = int(max(inter.latency_ms, 0.0) * 1_000_000)
+            start_ns = curr_ns
+            end_ns = start_ns + max(duration_ns, 1_000)
+            curr_ns = end_ns + 1_000_000
+
+            model_name = inter.llm.model or "unknown"
+            span_name = f"chat {model_name}"
+
+            attrs = [
+                _otel_attr("gen_ai.system", inter.llm.provider or "unknown"),
+                _otel_attr("gen_ai.request.model", model_name),
+                _otel_attr("gen_ai.usage.input_tokens", inter.llm.usage.input_tokens),
+                _otel_attr("gen_ai.usage.output_tokens", inter.llm.usage.output_tokens),
+                _otel_attr("http.response.status_code", inter.response.status_code),
+                _otel_attr("http.request.method", inter.request.method),
+                _otel_attr("url.full", inter.request.url),
+                _otel_attr("cassette.file", cassette_name),
+            ]
+            if inter.llm.usage.cached_input_tokens > 0:
+                attrs.append(_otel_attr("gen_ai.usage.cached_input_tokens", inter.llm.usage.cached_input_tokens))
+            if inter.llm.usage.reasoning_tokens > 0:
+                attrs.append(_otel_attr("gen_ai.usage.reasoning_tokens", inter.llm.usage.reasoning_tokens))
+            if inter.llm.estimated_cost_usd > 0.0:
+                attrs.append(_otel_attr("gen_ai.usage.cost_usd", round(inter.llm.estimated_cost_usd, 6)))
+
+            events: list[dict[str, Any]] = []
+            for tc in inter.llm.tool_calls:
+                tc_attrs = [_otel_attr("gen_ai.tool.name", tc.name)]
+                if tc.call_id:
+                    tc_attrs.append(_otel_attr("gen_ai.tool.call_id", tc.call_id))
+                if tc.arguments:
+                    args_repr = (
+                        json.dumps(tc.arguments, ensure_ascii=False)
+                        if isinstance(tc.arguments, (dict, list))
+                        else str(tc.arguments)
+                    )
+                    tc_attrs.append(_otel_attr("gen_ai.tool.arguments", args_repr))
+                events.append({
+                    "timeUnixNano": start_ns,
+                    "name": "gen_ai.tool.call",
+                    "attributes": tc_attrs,
+                })
+
+            status = (
+                {"code": 1}
+                if inter.response.status_code < 400
+                else {"code": 2, "message": f"HTTP {inter.response.status_code}"}
+            )
+
+            spans.append({
+                "traceId": trace_id,
+                "spanId": span_id,
+                "name": span_name,
+                "kind": 3,
+                "startTimeUnixNano": start_ns,
+                "endTimeUnixNano": end_ns,
+                "attributes": attrs,
+                "events": events,
+                "status": status,
+            })
+
+    payload = {
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": [
+                        _otel_attr("service.name", "rhinotape"),
+                        _otel_attr("service.version", _VERSION),
+                    ]
+                },
+                "scopeSpans": [
+                    {
+                        "scope": {
+                            "name": "rhinotape",
+                            "version": _VERSION,
+                        },
+                        "spans": spans,
+                    }
+                ],
+            }
+        ]
+    }
+    return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+
+
 def _render_junit(cassettes: list[Cassette], base_dir: Path) -> str:
     failures = 0
     total_time_s = 0.0
@@ -1391,6 +1512,8 @@ def _cmd_export(target: Path, *, fmt: str, output: Path | None = None) -> int:
 
     if fmt == "har":
         rendered = _render_har(cassettes)
+    elif fmt == "otel":
+        rendered = _render_otel(cassettes)
     elif fmt == "html":
         from rhinotape.html_report import render_html_report
 
@@ -2528,10 +2651,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_export.add_argument(
         "--format",
-        choices=["markdown", "csv", "har", "html", "junit"],
+        choices=["markdown", "csv", "har", "html", "junit", "otel"],
         default="markdown",
         dest="fmt",
-        help="Output format: markdown (default), csv, har, html, or junit.",
+        help="Output format: markdown (default), csv, har, html, junit, or otel.",
     )
     p_export.add_argument(
         "-o",
