@@ -1512,7 +1512,7 @@ def _cmd_export(target: Path, *, fmt: str, output: Path | None = None) -> int:
 
     if fmt == "har":
         rendered = _render_har(cassettes)
-    elif fmt == "otel":
+    elif fmt in ("otel", "otlp"):
         rendered = _render_otel(cassettes)
     elif fmt == "html":
         from rhinotape.html_report import render_html_report
@@ -2651,10 +2651,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_export.add_argument(
         "--format",
-        choices=["markdown", "csv", "har", "html", "junit", "otel"],
+        choices=["markdown", "csv", "har", "html", "junit", "otel", "otlp"],
         default="markdown",
         dest="fmt",
-        help="Output format: markdown (default), csv, har, html, junit, or otel.",
+        help="Output format: markdown (default), csv, har, html, junit, otel, or otlp.",
     )
     p_export.add_argument(
         "-o",

@@ -135,10 +135,14 @@ def test_cli_export_otel(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     )
     Cassette(path=tapes_dir / "tool_and_error.tape.json", interactions=[inter_tool]).save()
 
-    # 1. Export OTLP to stdout
+    # 1. Export OTLP to stdout (supports both --format otel and --format otlp)
     assert main(["export", str(tapes_dir), "--format", "otel"]) == 0
     raw_json = capsys.readouterr().out
     otel = json.loads(raw_json)
+
+    assert main(["export", str(tapes_dir), "--format", "otlp"]) == 0
+    otlp_json = json.loads(capsys.readouterr().out)
+    assert len(otlp_json["resourceSpans"][0]["scopeSpans"][0]["spans"]) == 2
 
     assert "resourceSpans" in otel
     assert len(otel["resourceSpans"]) == 1
