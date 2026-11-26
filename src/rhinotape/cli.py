@@ -1580,6 +1580,32 @@ def _render_otel(cassettes: list[Cassette]) -> str:
     return json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
 
 
+def _render_jsonl(cassettes: list[Cassette], base_dir: Path) -> str:
+    lines: list[str] = []
+    for cassette in cassettes:
+        rel_cassette = str(cassette.path.relative_to(base_dir)) if cassette.path else ""
+        for inter in cassette.interactions:
+            row: dict[str, Any] = {
+                "cassette": rel_cassette,
+                "provider": inter.llm.provider,
+                "model": inter.llm.model,
+                "request": {
+                    "method": inter.request.method,
+                    "url": inter.request.url,
+                    "headers": inter.request.headers,
+                    "body": inter.request.body,
+                },
+                "response_text": inter.llm.text,
+                "thinking": inter.llm.thinking,
+                "tool_calls": [tc.to_dict() for tc in inter.llm.tool_calls],
+                "usage": inter.llm.usage.to_dict(),
+                "estimated_cost_usd": inter.llm.estimated_cost_usd,
+                "latency_ms": round(inter.latency_ms, 2),
+            }
+            lines.append(json.dumps(row, ensure_ascii=False))
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 def _render_junit(cassettes: list[Cassette], base_dir: Path) -> str:
     failures = 0
     total_time_s = 0.0
@@ -1634,6 +1660,8 @@ def _cmd_export(target: Path, *, fmt: str, output: Path | None = None) -> int:
         rendered = _render_har(cassettes)
     elif fmt in ("otel", "otlp"):
         rendered = _render_otel(cassettes)
+    elif fmt == "jsonl":
+        rendered = _render_jsonl(cassettes, base_dir)
     elif fmt == "html":
         from rhinotape.html_report import render_html_report
 
@@ -2777,10 +2805,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_export.add_argument(
         "--format",
-        choices=["markdown", "csv", "har", "html", "junit", "otel", "otlp"],
+        choices=["markdown", "csv", "har", "html", "junit", "otel", "otlp", "jsonl"],
         default="markdown",
         dest="fmt",
-        help="Output format: markdown (default), csv, har, html, junit, otel, or otlp.",
+        help="Output format: markdown (default), csv, har, html, junit, otel, otlp, or jsonl.",
     )
     p_export.add_argument(
         "-o",
