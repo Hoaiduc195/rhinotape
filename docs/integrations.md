@@ -357,6 +357,25 @@ const check = await fetch(`${TAPE_BASE}/__tape__/assert`, {
 if (!check.ok) throw new Error(check.failures.join("; "));
 ```
 
+### Vercel AI SDK (Vitest)
+
+Set the OpenAI provider's `baseURL` to `${RHINOTAPE_URL}/v1` and pass a dummy `apiKey`.
+Select `openai.chat(model)` for a cassette recorded on `/v1/chat/completions`. The default
+OpenAI model selector uses the Responses API in AI SDK 7, which needs a Responses cassette.
+
+Run the [offline Vitest example](../examples/vercel-ai-sdk/replay.test.mjs) from the repository
+root with Node.js 22+:
+
+```bash
+npm install --no-save --package-lock=false ai@7.0.184 @ai-sdk/openai@4.0.125 vitest@4.0.18
+uv run rhinotape run examples/vercel-ai-sdk --strict-unused -- node node_modules/vitest/vitest.mjs run examples/vercel-ai-sdk/replay.test.mjs
+```
+
+`rhinotape run` starts a temporary local replay server and sets `RHINOTAPE_URL`. The test loads
+its cassette with `POST /__tape__/load`, calls `generateText`, and checks call count, token
+budget, and cassette consumption with `POST /__tape__/assert`. Use the same provider setup
+server-side in a Next.js test. The example uses a dummy key and makes no provider calls.
+
 ### Go
 
 ```go
