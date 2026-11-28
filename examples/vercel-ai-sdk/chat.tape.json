@@ -1,0 +1,77 @@
+{
+  "schema_version": 2,
+  "recorded_at": "2026-11-28T05:03:03.410987+00:00",
+  "metadata": {
+    "rhinotape_version": "0.5.0"
+  },
+  "summary": {
+    "calls": 1,
+    "total_tokens": 18,
+    "estimated_cost_usd": 5.4e-06
+  },
+  "interactions": [
+    {
+      "request": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "headers": {
+          "content-type": "application/json"
+        },
+        "body": {
+          "model": "gpt-4o-mini",
+          "messages": [
+            {
+              "role": "user",
+              "content": "Say hello."
+            }
+          ]
+        },
+        "fingerprint": "5375bf0148de8a33c14d279c",
+        "body_encoding": "json"
+      },
+      "response": {
+        "status_code": 200,
+        "headers": {
+          "content-length": "266",
+          "content-type": "application/json"
+        },
+        "body": {
+          "object": "chat.completion",
+          "id": "chatcmpl-example",
+          "created": 0,
+          "model": "gpt-4o-mini",
+          "choices": [
+            {
+              "index": 0,
+              "message": {
+                "role": "assistant",
+                "content": "Hello from the tape."
+              },
+              "finish_reason": "stop"
+            }
+          ],
+          "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 6,
+            "total_tokens": 18
+          }
+        },
+        "body_encoding": "json"
+      },
+      "latency_ms": 0.29,
+      "llm": {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 6,
+          "total_tokens": 18
+        },
+        "estimated_cost_usd": 5.4e-06,
+        "tool_calls": [],
+        "text": "Hello from the tape.",
+        "is_stream": false
+      }
+    }
+  ]
+}
