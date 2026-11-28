@@ -89,7 +89,7 @@ with TapeSession("tapes/claude.tape.json", mode=TapeMode.ONCE, patch_httpx=False
 
 ---
 
-## 3. Agent Frameworks (LangChain, LlamaIndex, PydanticAI)
+## 3. Agent Frameworks (LangChain, LlamaIndex, PydanticAI, LangGraph)
 
 ### LangChain
 
@@ -136,6 +136,41 @@ async with cfg.session("pydantic_ai_agent", patch_httpx=False) as session:
     res = await agent.run("Extract the city from: Flight to Tokyo.")
     session.assert_tokens_under(500)
 ```
+
+### LangGraph
+
+A LangGraph agent loop is several model calls in one run, so record it once and replay the whole loop offline. Pass the same `make_httpx_client(session)` to the chat model and use the tool-aware assertions on the session:
+
+```python
+from langchain_openai import ChatOpenAI
+from langgraph.graph import START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode, tools_condition
+from rhinotape.integrations import TapeConfig, make_httpx_client
+
+cfg = TapeConfig.from_env()
+with cfg.session("langgraph_agent", patch_httpx=False) as session:
+    llm = ChatOpenAI(
+        model="gpt-4o-mini", http_client=make_httpx_client(session)
+    ).bind_tools([get_weather])  # get_weather is a @tool function
+
+    def call_model(state: MessagesState):
+        return {"messages": [llm.invoke(state["messages"])]}
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("agent", call_model)
+    graph.add_node("tools", ToolNode([get_weather]))
+    graph.add_edge(START, "agent")
+    graph.add_conditional_edges("agent", tools_condition)
+    graph.add_edge("tools", "agent")
+    graph.compile().invoke({"messages": [("user", "Weather in Cairo?")]})
+
+    session.assert_call_count(2)                    # tool request + final answer
+    session.assert_tool_sequence(["get_weather"])
+    session.assert_no_tool_loop(max_consecutive=2)  # catches a stuck agent loop
+    session.assert_cost_under(0.05)
+```
+
+The first run records `langgraph_agent.tape.json`; later runs replay it with no network. A complete script that needs no API key (it uses a mock upstream) is in [`examples/langgraph_agent.py`](../examples/langgraph_agent.py).
 
 ---
 
